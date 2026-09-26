@@ -164,6 +164,16 @@ bool map_tiles_slot_loaded(map_tiles_handle_t handle, int index,
 void map_tiles_shift_slots(map_tiles_handle_t handle, int dx, int dy);
 
 /**
+ * @brief Read a raw tile file into a caller buffer (no slot management).
+ *
+ * nav-esp32 fork addition for the async loader: the loader task does file
+ * I/O into scratch buffers; the GUI task then memcpys into slot buffers
+ * (frame-atomic) and re-links images. Returns true on full 128 KiB read.
+ */
+bool map_tiles_load_file(map_tiles_handle_t handle, int zoom, int tile_x,
+                         int tile_y, uint8_t *dst);
+
+/**
  * @brief Convert GPS coordinates to tile coordinates
  * 
  * @param handle Map tiles handle

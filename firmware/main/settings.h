@@ -27,5 +27,9 @@ esp_err_t settings_set_paired(bool paired);
 bool settings_get_last_pos(int32_t *lat_e7, int32_t *lon_e7);
 esp_err_t settings_set_last_pos(int32_t lat_e7, int32_t lon_e7);
 
+// Map zoom (15-17), restored on boot. Written on every change (rare).
+uint8_t settings_get_zoom(void);
+esp_err_t settings_set_zoom(uint8_t zoom);
+
 // Erase bond state: paired=false. Caller also clears NimBLE bonds (M3).
 esp_err_t settings_factory_unpair(void);

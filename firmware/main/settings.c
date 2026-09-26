@@ -113,6 +113,35 @@ esp_err_t settings_factory_unpair(void)
 #define KEY_LAST_LAT "last_lat"
 #define KEY_LAST_LON "last_lon"
 #define KEY_HAS_POS "has_pos"
+#define KEY_ZOOM "zoom"
+#define ZOOM_DEFAULT 16
+#define ZOOM_MIN_S 15
+#define ZOOM_MAX_S 17
+
+uint8_t settings_get_zoom(void)
+{
+    nvs_handle_t h;
+    uint8_t z = ZOOM_DEFAULT;
+    if (nvs_open(NAV_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, KEY_ZOOM, &z);
+        nvs_close(h);
+    }
+    if (z < ZOOM_MIN_S || z > ZOOM_MAX_S) z = ZOOM_DEFAULT;
+    return z;
+}
+
+esp_err_t settings_set_zoom(uint8_t zoom)
+{
+    if (zoom < ZOOM_MIN_S) zoom = ZOOM_MIN_S;
+    if (zoom > ZOOM_MAX_S) zoom = ZOOM_MAX_S;
+    nvs_handle_t h;
+    esp_err_t r = nvs_open(NAV_NVS_NS, NVS_READWRITE, &h);
+    if (r != ESP_OK) return r;
+    r = nvs_set_u8(h, KEY_ZOOM, zoom);
+    if (r == ESP_OK) r = nvs_commit(h);
+    nvs_close(h);
+    return r;
+}
 
 bool settings_get_last_pos(int32_t *lat_e7, int32_t *lon_e7)
 {

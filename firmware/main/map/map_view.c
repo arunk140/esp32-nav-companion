@@ -7,6 +7,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdlib.h>
+#include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 static const char *TAG = "map";
 
@@ -35,6 +39,15 @@ static double s_last_lat, s_last_lon;  // last live fix (CMD/POSITION path)
 static bool s_have_fix;                // a live position has arrived
 static double s_stored_lat, s_stored_lon;  // last persisted fix (gray marker)
 static bool s_have_stored;
+// Follow mode: live fixes recenter the map (deadband: only outside inner
+// tile). Any manual drag/zoom clears it; Center re-engages it. Starts ON so
+// a fresh connect follows until first touched.
+static bool s_follow = true;
+// Jitter gate: ignore live fixes that move the target less than this many
+// meters (phone GPS wanders; the easing animation would chase noise).
+#define JITTER_M 15.0
+static double s_atx, s_aty;  // last applied target (fractional tiles)
+static bool s_have_target;
 // Marker animation: target (fix) vs rendered (eased) in fractional tiles.
 static double s_mtx, s_mty, s_mrx, s_mry;
 static void map_place_marker(void);
@@ -50,6 +63,7 @@ void map_accum(int dx, int dy)
 }
 
 static void reload_all(void);  // defined below (needs s_imgs, created in map_view_create)
+static void map_update_center_btn(void);  // defined below (needs buttons)
 
 // Consume accumulated drag: move container, shift grid by whole tiles,
 // reload changed tiles. Runs at most every 33 ms from map_view_poll().
@@ -58,6 +72,11 @@ static void map_view_apply(void)
     if (!s_acc_x && !s_acc_y) return;
     int dx = s_acc_x, dy = s_acc_y;
     s_acc_x = s_acc_y = 0;
+    // Manual drag breaks follow mode (re-lock via Center).
+    if (s_follow) {
+        s_follow = false;
+        map_update_center_btn();
+    }
     // Cap per apply: during a blocking reload the accumulator keeps growing,
     // and applying it all at once causes a multi-tile jump -> full reload ->
     // another block (death spiral). Drop the excess; the map can't outrun SD.
@@ -122,15 +141,92 @@ static void recenter(double lat, double lon)
     reload_all();
 }
 
+// Follow-mode centering: like recenter(), but positions the grid with
+// sub-tile precision so the fix lands on the EXACT screen centre instead of
+// up to 128 px off (the deadband offset). Same-origin fixes cost no SD reads
+// (if_changed skips everything); only the container moves.
+static void recenter_exact(double lat, double lon)
+{
+    s_clat = lat;
+    s_clon = lon;
+    double x, y;
+    map_tiles_gps_to_tile_xy(s_map, lat, lon, &x, &y);
+    int tx = (int)x - GRID / 2;
+    int ty = (int)y - GRID / 2;
+    double fx = x - (int)x, fy = y - (int)y;
+    if (tx == s_gx && ty == s_gy) {
+        s_px = -CENTER_PX - (fx - 0.5) * TILE;
+        s_py = -CENTER_PX - (fy - 0.5) * TILE;
+        lv_obj_set_pos(s_box, s_px, s_py);
+        return;
+    }
+    map_tiles_set_center_from_gps(s_map, lat, lon);
+    map_tiles_get_position(s_map, &s_gx, &s_gy);
+    s_px = -CENTER_PX - (fx - 0.5) * TILE;
+    s_py = -CENTER_PX - (fy - 0.5) * TILE;
+    lv_obj_set_pos(s_box, s_px, s_py);
+    reload_all();
+}
+
+static lv_obj_t *s_btn_in, *s_btn_out;
+static lv_obj_t *s_btn_center;
+static void map_update_zoom_btns(void);
+
+// Center button is only useful when NOT following: hidden while centered,
+// reappears on any manual drag/zoom.
+static void map_update_center_btn(void)
+{
+    if (!s_btn_center) return;
+    if (s_follow) lv_obj_add_flag(s_btn_center, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(s_btn_center, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Geo under a screen point (for zoom anchors). Inverts the container offset:
+// screen (sx,sy) -> box (sx-px, sy-py) -> fractional tile -> GPS.
+static void screen_to_geo(int sx, int sy, double *lat, double *lon)
+{
+    double fx = s_gx + (sx - s_px) / (double)TILE;
+    double fy = s_gy + (sy - s_py) / (double)TILE;
+    map_tiles_tile_xy_to_gps(s_map, fx, fy, lat, lon);
+}
+
 static void set_zoom(int z)
 {
     if (z < ZOOM_MIN) z = ZOOM_MIN;
     if (z > ZOOM_MAX) z = ZOOM_MAX;
     if (z == s_zoom) return;
+    // Manual zoom breaks follow mode (re-lock via Center).
+    if (s_follow) {
+        s_follow = false;
+        map_update_center_btn();
+    }
     s_zoom = z;
+    settings_set_zoom(z);  // persisted; zoom changes are rare (GUI task: safe)
     map_tiles_set_zoom(s_map, z);
     recenter(s_clat, s_clon);
+    map_update_zoom_btns();
     ESP_LOGI(TAG, "zoom %d", z);
+}
+
+// Zoom anchored on a fixed geo point (stays put on screen across the zoom).
+static void set_zoom_at(int z, double lat, double lon)
+{
+    if (z < ZOOM_MIN) z = ZOOM_MIN;
+    if (z > ZOOM_MAX) z = ZOOM_MAX;
+    if (z == s_zoom) {
+        // Already there: still re-lock semantics unchanged, just recenter.
+        recenter(lat, lon);
+        return;
+    }
+    if (s_follow) {
+        s_follow = false;
+        map_update_center_btn();
+    }
+    s_zoom = z;
+    settings_set_zoom(z);
+    map_tiles_set_zoom(s_map, z);
+    recenter(lat, lon);
+    map_update_zoom_btns();
 }
 
 // Drag: LVGL pointer vect applied to container; normalize by whole tiles.
@@ -165,11 +261,41 @@ static void drag_cb(lv_event_t *e)
     return;
 }
 
-static void btn_zoom_in(lv_event_t *e) { (void)e; set_zoom(s_zoom + 1); }
-static void btn_zoom_out(lv_event_t *e) { (void)e; set_zoom(s_zoom - 1); }
+static lv_obj_t *s_btn_in, *s_btn_out;
+
+// Gray out zoom buttons at the limits (ASCII-safe, no icon fonts needed).
+// (Prototype is up with set_zoom; definition here.)
+static void map_update_zoom_btns(void)
+{
+    if (s_btn_in) {
+        if (s_zoom >= ZOOM_MAX) lv_obj_add_state(s_btn_in, LV_STATE_DISABLED);
+        else lv_obj_remove_state(s_btn_in, LV_STATE_DISABLED);
+    }
+    if (s_btn_out) {
+        if (s_zoom <= ZOOM_MIN) lv_obj_add_state(s_btn_out, LV_STATE_DISABLED);
+        else lv_obj_remove_state(s_btn_out, LV_STATE_DISABLED);
+    }
+}
+
+static void btn_zoom_in(lv_event_t *e)
+{
+    (void)e;
+    double lat, lon;
+    screen_to_geo(SCR / 2, SCR / 2, &lat, &lon);  // anchor: screen centre
+    set_zoom_at(s_zoom + 1, lat, lon);
+}
+static void btn_zoom_out(lv_event_t *e)
+{
+    (void)e;
+    double lat, lon;
+    screen_to_geo(SCR / 2, SCR / 2, &lat, &lon);  // anchor: screen centre
+    set_zoom_at(s_zoom - 1, lat, lon);
+}
 static void recenter_preferred(void)
 {
-    // Live fix > stored fix > browse default.
+    // Live fix > stored fix > browse default. Re-locks follow mode.
+    s_follow = true;
+    map_update_center_btn();
     if (s_have_fix) recenter(s_last_lat, s_last_lon);
     else if (s_have_stored) recenter(s_stored_lat, s_stored_lon);
     else recenter(DEFAULT_LAT, DEFAULT_LON);
@@ -204,16 +330,41 @@ void map_view_set_position(double lat, double lon, bool live)
     }
     double fx, fy;
     map_tiles_gps_to_tile_xy(s_map, lat, lon, &fx, &fy);
-    // Outside the inner tile? Recenter so the fix sits at grid centre.
-    if (fx < s_gx + 1 || fx >= s_gx + 2 || fy < s_gy + 1 || fy >= s_gy + 2) {
-        recenter(lat, lon);
+    if (live && s_have_target) {
+        // Jitter gate: sub-threshold wander never becomes a target.
+        double mpp = 156543.03392 * cos(lat * M_PI / 180.0) / (1 << s_zoom);
+        double dxm = (fx - s_atx) * TILE * mpp;
+        double dym = (fy - s_aty) * TILE * mpp;
+        if (dxm * dxm + dym * dym < JITTER_M * JITTER_M) {
+            return;
+        }
+    }
+    // Outside the inner tile? Recenter so the fix sits at grid centre —
+    // but ONLY in follow mode. A manual browse never gets yanked back.
+    // Follow uses exact centering (dot on screen centre); browse keeps the
+    // deadband recenter only via the Center button.
+    if (live && s_follow) {
+        recenter_exact(lat, lon);
         map_tiles_gps_to_tile_xy(s_map, lat, lon, &fx, &fy);
-        // Grid jumped: snap, don't animate across the world.
+        // Map and dot move together: snap the animation to the new centre.
         s_mrx = fx;
         s_mry = fy;
+    } else if (fx < s_gx + 1 || fx >= s_gx + 2 || fy < s_gy + 1 || fy >= s_gy + 2) {
+        // Not following and fix off-grid (e.g. boot with stored fix far from
+        // the default view): center it once so the marker is visible.
+        if (!s_have_target) {
+            recenter(lat, lon);
+            map_tiles_gps_to_tile_xy(s_map, lat, lon, &fx, &fy);
+            s_mrx = fx;
+            s_mry = fy;
+        }
+        // Otherwise leave the grid alone; the marker may sit off-screen.
     }
     s_mtx = fx;
     s_mty = fy;
+    s_atx = fx;
+    s_aty = fy;
+    s_have_target = true;
     if (!s_marker) {
         s_marker = lv_obj_create(s_box);
         lv_obj_set_size(s_marker, 20, 20);
@@ -279,11 +430,13 @@ void map_view_create(lv_obj_t *parent)
     lv_obj_set_scrollbar_mode(parent, LV_SCROLLBAR_MODE_OFF);
 
     const char *folders[] = {"street_map"};
+    // Restore persisted zoom (button states + tile set follow it).
+    s_zoom = settings_get_zoom();
     map_tiles_config_t cfg = {
         .base_path = "/sdcard",
         .tile_folders = {folders[0]},
         .tile_type_count = 1,
-        .default_zoom = DEFAULT_ZOOM,
+        .default_zoom = s_zoom,
         .use_spiram = true,
         .default_tile_type = 0,
         .grid_cols = GRID,
@@ -318,11 +471,12 @@ void map_view_create(lv_obj_t *parent)
     }
 
     // Zoom + recenter: right edge / bottom centre, inside safe circle.
-    lv_obj_t *bi = mk_btn(parent, "+", 404, 176);
-    lv_obj_add_event_cb(bi, btn_zoom_in, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *bo = mk_btn(parent, "-", 404, 240);
-    lv_obj_add_event_cb(bo, btn_zoom_out, LV_EVENT_CLICKED, NULL);
+    s_btn_in = mk_btn(parent, "+", 404, 176);
+    lv_obj_add_event_cb(s_btn_in, btn_zoom_in, LV_EVENT_CLICKED, NULL);
+    s_btn_out = mk_btn(parent, "-", 404, 240);
+    lv_obj_add_event_cb(s_btn_out, btn_zoom_out, LV_EVENT_CLICKED, NULL);
     lv_obj_t *br = lv_button_create(parent);
+    s_btn_center = br;
     lv_obj_set_size(br, 64, 44);
     lv_obj_set_pos(br, 208, 412);
     lv_obj_t *rl = lv_label_create(br);
@@ -331,6 +485,8 @@ void map_view_create(lv_obj_t *parent)
     lv_obj_add_event_cb(br, btn_recenter, LV_EVENT_CLICKED, NULL);
 
     recenter(DEFAULT_LAT, DEFAULT_LON);
+    map_update_zoom_btns();
+    map_update_center_btn();  // hidden initially (following)
     // Boot to the last known fix if there is one (gray = stale, no phone).
     int32_t ll_lat = 0, ll_lon = 0;
     if (settings_get_last_pos(&ll_lat, &ll_lon)) {
@@ -371,11 +527,12 @@ void map_view_poll(void)
     int d = abs((int)x[0] - (int)x[1]) + abs((int)y[0] - (int)y[1]);
     uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
     if (prev >= 0 && (int)(now - cool) > 600) {
-        if (d - prev > 50) {
-            set_zoom(s_zoom + 1);
-            cool = now;
-        } else if (prev - d > 50) {
-            set_zoom(s_zoom - 1);
+        if (d - prev > 50 || prev - d > 50) {
+            // Anchor: midpoint between the two fingers.
+            double lat, lon;
+            screen_to_geo(((int)x[0] + (int)x[1]) / 2,
+                          ((int)y[0] + (int)y[1]) / 2, &lat, &lon);
+            set_zoom_at(s_zoom + (d > prev ? 1 : -1), lat, lon);
             cool = now;
         }
     }
@@ -386,6 +543,8 @@ void map_view_destroy(void)
 {
     s_ready = false;
     s_marker = NULL;  // children die with the screen
+    s_btn_in = s_btn_out = NULL;
+    s_btn_center = NULL;
     s_have_fix = false;
     s_have_stored = false;
     if (s_map) {

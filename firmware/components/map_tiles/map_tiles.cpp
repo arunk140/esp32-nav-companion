@@ -624,8 +624,36 @@ void map_tiles_shift_slots(map_tiles_handle_t handle, int dx, int dy)
     }
 }
 
-void map_tiles_get_grid_size(map_tiles_handle_t handle, int* cols, int* rows)
+bool map_tiles_load_file(map_tiles_handle_t handle, int zoom, int tile_x,
+                         int tile_y, uint8_t *dst)
 {
+    if (!handle || !handle->initialized || !dst) {
+        return false;
+    }
+
+    char path[256];
+    const char *folder = handle->tile_folders[handle->current_tile_type];
+    snprintf(path, sizeof(path), "%s/%s/%d/%d/%d.bin",
+             handle->base_path, folder, zoom, tile_x, tile_y);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+
+    // Skip 12-byte LVGL header; body is 256x256 RGB565.
+    if (fseek(f, 12, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+    size_t n = fread(dst, 1,
+                     MAP_TILES_TILE_SIZE * MAP_TILES_TILE_SIZE * MAP_TILES_BYTES_PER_PIXEL,
+                     f);
+    fclose(f);
+    return n == MAP_TILES_TILE_SIZE * MAP_TILES_TILE_SIZE * MAP_TILES_BYTES_PER_PIXEL;
+}
+
+void map_tiles_get_grid_size(map_tiles_handle_t handle, int* cols, int* rows){
     if (!handle || !handle->initialized || !cols || !rows) {
         if (cols) *cols = 0;
         if (rows) *rows = 0;
