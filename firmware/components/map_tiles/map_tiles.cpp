@@ -653,6 +653,53 @@ bool map_tiles_load_file(map_tiles_handle_t handle, int zoom, int tile_x,
     return n == MAP_TILES_TILE_SIZE * MAP_TILES_TILE_SIZE * MAP_TILES_BYTES_PER_PIXEL;
 }
 
+uint8_t *map_tiles_slot_ensure(map_tiles_handle_t handle, int index)
+{
+    if (!handle || !handle->initialized || index < 0 ||
+        index >= handle->tile_count) {
+        return NULL;
+    }
+
+    if (!handle->tile_bufs[index]) {
+        uint32_t caps = handle->use_spiram ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+                                           : MALLOC_CAP_DMA;
+        handle->tile_bufs[index] = (uint8_t *)heap_caps_malloc(
+            MAP_TILES_TILE_SIZE * MAP_TILES_TILE_SIZE * MAP_TILES_BYTES_PER_PIXEL,
+            caps);
+        if (!handle->tile_bufs[index]) {
+            ESP_LOGE(TAG, "Tile %d: allocation failed", index);
+            return NULL;
+        }
+        handle->loaded_tx[index] = INT32_MIN;
+        handle->loaded_ty[index] = INT32_MIN;
+        handle->loaded_z[index] = INT32_MIN;
+    }
+    return handle->tile_bufs[index];
+}
+
+void map_tiles_slot_commit(map_tiles_handle_t handle, int index, int tile_x,
+                           int tile_y)
+{
+    if (!handle || !handle->initialized || index < 0 ||
+        index >= handle->tile_count || !handle->tile_bufs[index]) {
+        return;
+    }
+
+    handle->tile_imgs[index].header.w = MAP_TILES_TILE_SIZE;
+    handle->tile_imgs[index].header.h = MAP_TILES_TILE_SIZE;
+    handle->tile_imgs[index].header.cf = MAP_TILES_COLOR_FORMAT;
+    handle->tile_imgs[index].header.stride =
+        MAP_TILES_TILE_SIZE * MAP_TILES_BYTES_PER_PIXEL;
+    handle->tile_imgs[index].data = (const uint8_t *)handle->tile_bufs[index];
+    handle->tile_imgs[index].data_size =
+        MAP_TILES_TILE_SIZE * MAP_TILES_TILE_SIZE * MAP_TILES_BYTES_PER_PIXEL;
+    handle->tile_imgs[index].reserved = NULL;
+    handle->tile_imgs[index].reserved_2 = NULL;
+    handle->loaded_tx[index] = tile_x;
+    handle->loaded_ty[index] = tile_y;
+    handle->loaded_z[index] = handle->zoom;
+}
+
 void map_tiles_get_grid_size(map_tiles_handle_t handle, int* cols, int* rows){
     if (!handle || !handle->initialized || !cols || !rows) {
         if (cols) *cols = 0;

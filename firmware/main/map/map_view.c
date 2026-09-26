@@ -1,4 +1,5 @@
 #include "map/map_view.h"
+#include "map/loader.h"
 #include "map_tiles.h"
 #include "display/lvgl9_port.h"  // touch_last_sample (sole touch reader is LVGL)
 #include "settings.h"            // last known position (gray marker)
@@ -7,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -39,6 +41,10 @@ static double s_last_lat, s_last_lon;  // last live fix (CMD/POSITION path)
 static bool s_have_fix;                // a live position has arrived
 static double s_stored_lat, s_stored_lon;  // last persisted fix (gray marker)
 static bool s_have_stored;
+// Marker animation: target (fix) vs rendered (eased) in fractional tiles.
+static double s_mtx, s_mty, s_mrx, s_mry;
+static double s_atx, s_aty;  // last applied target (fractional tiles)
+static bool s_have_target;
 // Follow mode: live fixes recenter the map (deadband: only outside inner
 // tile). Any manual drag/zoom clears it; Center re-engages it. Starts ON so
 // a fresh connect follows until first touched.
@@ -46,10 +52,6 @@ static bool s_follow = true;
 // Jitter gate: ignore live fixes that move the target less than this many
 // meters (phone GPS wanders; the easing animation would chase noise).
 #define JITTER_M 15.0
-static double s_atx, s_aty;  // last applied target (fractional tiles)
-static bool s_have_target;
-// Marker animation: target (fix) vs rendered (eased) in fractional tiles.
-static double s_mtx, s_mty, s_mrx, s_mry;
 static void map_place_marker(void);
 // Drag accumulator: touch events (~200 Hz) only add deltas here.
 // map_view_apply() consumes them at 30 Hz so SD reloads never run in an
@@ -62,8 +64,21 @@ void map_accum(int dx, int dy)
     s_acc_y += dy;
 }
 
-static void reload_all(void);  // defined below (needs s_imgs, created in map_view_create)
+// Grid-frame shift: gx/gy just moved by (dx, dy) tiles, so every tile-space
+// coordinate (animation target/rendered, jitter reference) must move the
+// opposite way or the marker teleports. Call on every origin change.
+static void frame_shift(int dx, int dy)
+{
+    s_mtx -= dx;
+    s_mty -= dy;
+    s_mrx -= dx;
+    s_mry -= dy;
+    s_atx -= dx;
+    s_aty -= dy;
+}
+
 static void map_update_center_btn(void);  // defined below (needs buttons)
+static void grid_request(void);  // defined below (needs grid state)
 
 // Consume accumulated drag: move container, shift grid by whole tiles,
 // reload changed tiles. Runs at most every 33 ms from map_view_poll().
@@ -96,39 +111,80 @@ static void map_view_apply(void)
     bool shifted = (sdx || sdy);
     if (shifted) {
         map_tiles_shift_slots(s_map, sdx, sdy);
+        // Marker tile-coords live in the grid frame: shift them too, or the
+        // dot teleports on every drag-shift (then snaps back on next fix).
+        frame_shift(sdx, sdy);
         // New grid-centre geo for later zoom ops.
         map_tiles_tile_xy_to_gps(s_map, s_gx + GRID / 2.0, s_gy + GRID / 2.0,
                                  &s_clat, &s_clon);
-        reload_all();
+        grid_request();
     }
 }
 
-static void reload_all(void)
+static uint32_t s_gen;       // invalidates in-flight loads on a new batch
+static int s_pending;        // unresolved loads of the current generation
+static int s_scale;          // zoom preview scale (0 = none, else LVGL units)
+static bool s_qpend[GRID * GRID];  // per-slot duplicate guard within a batch
+
+// Enqueue every non-resident slot of the current grid; link resident slots
+// immediately. Returns instantly — the loader task does the SD reads and
+// grid_drain() (below, from the GUI task) swaps buffers in.
+static void grid_request(void)
 {
-    // NOTE: only called from create path (images exist) and map_view_apply
-    // (gated by s_ready in map_view_poll). No guard needed here.
-    int64_t t0 = esp_timer_get_time();
-    int fails = 0, fresh = 0;
+    s_gen++;
+    s_pending = 0;
+    memset(s_qpend, 0, sizeof(s_qpend));
     for (int row = 0; row < GRID; row++) {
         for (int col = 0; col < GRID; col++) {
             int i = row * GRID + col;
-            bool was_resident =
-                map_tiles_slot_loaded(s_map, i, s_gx + col, s_gy + row);
-            if (map_tiles_load_tile_if_changed(s_map, i, s_gx + col, s_gy + row)) {
-                if (!was_resident) fresh++;
+            int tx = s_gx + col, ty = s_gy + row;
+            if (map_tiles_slot_loaded(s_map, i, tx, ty)) {
                 lv_image_set_src(s_imgs[i], map_tiles_get_image(s_map, i));
-            } else {
-                lv_image_set_src(s_imgs[i], NULL);  // gap shows box bg
-                fails++;
+                continue;
             }
+            loader_enqueue(i, s_zoom, tx, ty, s_gen);
+            s_pending++;
+            s_qpend[i] = true;
         }
     }
-    if (fails) ESP_LOGD(TAG, "%d tiles missing at z%d origin %d,%d", fails, s_zoom, s_gx, s_gy);
-    int64_t ms = (esp_timer_get_time() - t0) / 1000;
-    if (ms > 20) ESP_LOGI(TAG, "reload %lld ms (fresh %d)", (long long)ms, fresh);
 }
 
-// Recenters grid so (lat,lon) sits at grid centre. Full reload (changed only).
+// Drain loader completions: memcpy scratch into the slot buffer (frame-atomic:
+// only the GUI task touches LVGL + slot buffers), re-link, release scratch.
+// Drops stale generations and clears the zoom preview when current lands.
+static void grid_drain(void)
+{
+    load_done_t d;
+    while (loader_poll_done(&d)) {
+        if (d.gen != s_gen) {
+            if (d.scratch) loader_release(d.scratch);
+            continue;
+        }
+        if (d.ok && d.scratch) {
+            uint8_t *buf = map_tiles_slot_ensure(s_map, d.slot);
+            if (buf) {
+                memcpy(buf, d.scratch, LOADER_TILE_BYTES);
+                map_tiles_slot_commit(s_map, d.slot, d.x, d.y);
+                lv_image_set_src(s_imgs[d.slot],
+                                 map_tiles_get_image(s_map, d.slot));
+                lv_obj_invalidate(s_imgs[d.slot]);
+            }
+            loader_release(d.scratch);
+        } else {
+            lv_image_set_src(s_imgs[d.slot], NULL);  // gap shows box bg
+            lv_obj_invalidate(s_imgs[d.slot]);
+        }
+        s_qpend[d.slot] = false;
+        if (s_pending > 0) s_pending--;
+        if (s_pending == 0 && s_scale) {
+            s_scale = 0;
+            lv_obj_set_style_transform_scale_x(s_box, 256, 0);
+            lv_obj_set_style_transform_scale_y(s_box, 256, 0);
+        }
+    }
+}
+
+// Recenters grid so (lat,lon) sits at grid centre. Requests tiles async.
 static void recenter(double lat, double lon)
 {
     s_clat = lat;
@@ -138,13 +194,13 @@ static void recenter(double lat, double lon)
     s_px = -CENTER_PX;
     s_py = -CENTER_PX;
     lv_obj_set_pos(s_box, s_px, s_py);
-    reload_all();
+    grid_request();
 }
 
 // Follow-mode centering: like recenter(), but positions the grid with
 // sub-tile precision so the fix lands on the EXACT screen centre instead of
 // up to 128 px off (the deadband offset). Same-origin fixes cost no SD reads
-// (if_changed skips everything); only the container moves.
+// (slots already resident); only the container moves.
 static void recenter_exact(double lat, double lon)
 {
     s_clat = lat;
@@ -165,7 +221,7 @@ static void recenter_exact(double lat, double lon)
     s_px = -CENTER_PX - (fx - 0.5) * TILE;
     s_py = -CENTER_PX - (fy - 0.5) * TILE;
     lv_obj_set_pos(s_box, s_px, s_py);
-    reload_all();
+    grid_request();
 }
 
 static lv_obj_t *s_btn_in, *s_btn_out;
@@ -222,10 +278,25 @@ static void set_zoom_at(int z, double lat, double lon)
         s_follow = false;
         map_update_center_btn();
     }
+    bool zoom_in = z > s_zoom;
     s_zoom = z;
     settings_set_zoom(z);
     map_tiles_set_zoom(s_map, z);
     recenter(lat, lon);
+    // Instant preview: scale old content around the anchor (pivot in box
+    // coords) while the new zoom loads async; grid_drain() unscales once the
+    // generation lands. In: 200%, out: 50%.
+    {
+        double fx, fy;
+        map_tiles_gps_to_tile_xy(s_map, lat, lon, &fx, &fy);
+        int pivx = (int)((fx - s_gx) * TILE);
+        int pivy = (int)((fy - s_gy) * TILE);
+        s_scale = zoom_in ? 512 : 128;
+        lv_obj_set_style_transform_pivot_x(s_box, pivx, 0);
+        lv_obj_set_style_transform_pivot_y(s_box, pivy, 0);
+        lv_obj_set_style_transform_scale_x(s_box, s_scale, 0);
+        lv_obj_set_style_transform_scale_y(s_box, s_scale, 0);
+    }
     map_update_zoom_btns();
 }
 
@@ -442,13 +513,25 @@ void map_view_create(lv_obj_t *parent)
         .grid_cols = GRID,
         .grid_rows = GRID,
     };
-    s_map = map_tiles_init(&cfg);
+    // Handle is an app singleton (loader caches it): init once, never freed.
+    // Re-entering with a live handle just reuses buffers (instant map).
     if (!s_map) {
-        lv_obj_t *l = lv_label_create(parent);
-        lv_label_set_text(l, "No map: SD missing?");
-        lv_obj_center(l);
-        ESP_LOGE(TAG, "map_tiles_init failed");
-        return;
+        s_map = map_tiles_init(&cfg);
+        if (!s_map) {
+            lv_obj_t *l = lv_label_create(parent);
+            lv_label_set_text(l, "No map: SD missing?");
+            lv_obj_center(l);
+            ESP_LOGE(TAG, "map_tiles_init failed");
+            return;
+        }
+    }
+    // Loader task + queues persist across show_map cycles; start once.
+    // (Holds s_map for file reads; recreated handle is assigned to s_map
+    // before any enqueue, and loader only dereferences it per-request.)
+    static bool loader_started;
+    if (!loader_started) {
+        loader_started = true;
+        loader_init(s_map);
     }
 
     s_box = lv_obj_create(parent);
@@ -508,6 +591,7 @@ void map_view_poll(void)
 {
     if (!s_ready) return;
     map_animate_marker();
+    grid_drain();  // async tile completions (memcpy + re-link, GUI task)
     // 30 Hz drag application (see accumulator above).
     static uint32_t last_apply;
     uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -547,10 +631,9 @@ void map_view_destroy(void)
     s_btn_center = NULL;
     s_have_fix = false;
     s_have_stored = false;
-    if (s_map) {
-        map_tiles_cleanup(s_map);
-        s_map = NULL;
-    }
+    s_scale = 0;
+    // NOTE: s_map intentionally NOT freed (app singleton for the loader).
+    // Buffers persist; returning to the map is instant.
 }
 
 bool map_view_is_live(void)

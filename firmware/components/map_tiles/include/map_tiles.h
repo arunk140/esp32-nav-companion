@@ -174,6 +174,19 @@ bool map_tiles_load_file(map_tiles_handle_t handle, int zoom, int tile_x,
                          int tile_y, uint8_t *dst);
 
 /**
+ * Ensure a slot buffer exists (PSRAM), allocating on first use. Marks the
+ * slot stale. nav-esp32 fork addition for the async loader.
+ */
+uint8_t *map_tiles_slot_ensure(map_tiles_handle_t handle, int index);
+
+/**
+ * Point a slot's image descriptor at its (filled) buffer and record coords.
+ * Call after memcpying a loader scratch buffer in. nav-esp32 fork addition.
+ */
+void map_tiles_slot_commit(map_tiles_handle_t handle, int index, int tile_x,
+                           int tile_y);
+
+/**
  * @brief Convert GPS coordinates to tile coordinates
  * 
  * @param handle Map tiles handle

@@ -5,6 +5,7 @@ idf_component_register(
     "ble/ble_service.c"
     "display/backlight.c"
     "display/lvgl9_port.c"
+    "map/loader.c"
     "map/map_view.c"
     "ui/pairing_screen.c"
     "drivers/BAT_Driver/BAT_Driver.c"
