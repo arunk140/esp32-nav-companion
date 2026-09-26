@@ -1,0 +1,36 @@
+# ---> misc
+.build/
+build/
+out/
+*.o
+*.a
+*.elf
+*.bin
+*.map
+sdkconfig
+sdkconfig.old
+dependencies.lock
+
+# ---> esp-idf
+managed_components/
+components/map_tiles/  # forked, see firmware/components/README.md
+
+# ---> android
+app/build/
+app/.cxx/
+.gradle/
+local.properties
+*.iml
+.idea/
+*.ap_
+*.dex
+
+# ---> os
+.DS_Store
+Thumbs.db
+
+# ---> editor
+.vscode/
+*.swp
+*~
+tmp/

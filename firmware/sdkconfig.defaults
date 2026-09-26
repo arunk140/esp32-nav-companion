@@ -1,0 +1,33 @@
+CONFIG_LV_MEM_CUSTOM=y
+CONFIG_LV_MEMCPY_MEMSET_STD=y
+CONFIG_LV_USE_USER_DATA=y
+CONFIG_LV_USE_PERF_MONITOR=y
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_SIZE=64
+
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
+
+# BLE controller + NimBLE host (M3). Bluedroid off.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# Persist bonding keys in NVS. Without this, bonds live in RAM and every
+# reboot re-triggers pairing on the phone.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+
+# Long filenames: tile-type folders (e.g. street_map) exceed 8.3, and without
+# this FATFS returns short names (STREET~1), so opendir("street_map") fails.
+CONFIG_FATFS_LFN_HEAP=y
+
+# Ship quiet: default log verbosity WARN (INFO/DEBUG compiled out). The USB
+# serial console BLOCKS when no reader is attached; chatty INFO logs (flush
+# rate, tile reloads, NimBLE debug) wedge the BLE host task and trip a Core 0
+# interrupt WDT. Dev builds can raise this via menuconfig.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y

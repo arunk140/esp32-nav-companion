@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.0"
+  lvgl/lvgl: ">=9.3.0"
+  espressif/qrcode: "^0.2.0"
+  # map_tiles fork — vendor under firmware/components/map_tiles (M2).
+  # Until then, builds needing the map screen will fail at the map/ include.
