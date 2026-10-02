@@ -96,7 +96,8 @@ BLE extension (existing UUIDs unchanged, mirrored in `BleManager.kt` / `MediaBri
 | MEDIA_CMD | `f8a580f6-aa84-4898-ad67-a66c12262ac1` | device → phone, notify | `1` play/pause, `2` next, `3` prev, `4` vol+, `5` vol−, `6` set volume (u8 %), `7` resync |
 
 - STATE is sent only on changes; the device advances the progress ring itself.
-- Title and artist show above the album art, and in a toast over the map when the track changes. The board font is Latin-only, so `media_view.c` drops non-Latin characters instead of drawing empty boxes; long titles are ellipsised (toast: clipped to 37 chars).
+- Title and artist show above the album art, and in a toast over the map when the track changes. The board font is Latin-only, so `media_view.c` drops non-Latin characters instead of drawing empty boxes.
+- Long text is chopped, not wrapped: title and artist to 25 characters on the media page, the map toast to 20, each cut at a word boundary where there is one and suffixed with `...`. The full text is kept in RAM so each surface chops from the original.
 - The map's overlay buttons are translucent white with a drop shadow, so they read as floating controls.
 - If art for the current track is missing or stalls for 3 s, the device sends a resync.
 - **GATT cache:** the device sends Service Changed on every boot, so bonded phones re-read the characteristic table after firmware updates. As a fallback, the app clears Android's GATT cache (`refresh()`) once if the media characteristics are missing.

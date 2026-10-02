@@ -4,6 +4,7 @@
 #include "ui_common.h"
 #include "esp_timer.h"
 #include <stdio.h>
+#include <string.h>
 
 // Layout (480x480 round). Art centred above the middle so the transport row
 // fits below; volume and back sit where zoom and the music button are on
@@ -103,13 +104,35 @@ static void sanitise(char *dst, size_t cap, const char *src)
     if (!dst[0]) snprintf(dst, cap, "?");
 }
 
+// Copies at most `max` characters, cut at a word boundary where there is
+// one, with "..." when it had to be shortened.
+static void chop(char *dst, size_t cap, const char *src, size_t max)
+{
+    size_t n = strlen(src);
+    if (n <= max) {
+        snprintf(dst, cap, "%s", src);
+        return;
+    }
+    for (size_t i = max; i > max / 2; i--) {
+        if (src[i] == ' ') {
+            n = i;
+            break;
+        }
+    }
+    snprintf(dst, cap, "%.*s...", (int)n, src);
+}
+
 void media_view_set_text(const char *title, const char *artist)
 {
+    // Keep the full text for the map toast, which chops to its own length.
     sanitise(s_title, sizeof(s_title), title);
     sanitise(s_artist, sizeof(s_artist), artist);
     if (!s_lbl_title) return;
-    lv_label_set_text(s_lbl_title, s_title);
-    lv_label_set_text(s_lbl_artist, s_artist);
+    char t[32], a[32];
+    chop(t, sizeof(t), s_title, 25);
+    chop(a, sizeof(a), s_artist, 25);
+    lv_label_set_text(s_lbl_title, t);
+    lv_label_set_text(s_lbl_artist, a);
 }
 
 const char *media_view_title(void)
@@ -404,8 +427,7 @@ void media_view_set_state(const nav_media_state_t *st)
     refresh_progress();
     refresh_controls();
     if (s_msg_key == 0) {  // a new track: labels are current again
-        lv_label_set_text(s_lbl_title, s_title);
-        lv_label_set_text(s_lbl_artist, s_artist);
+        media_view_set_text(s_title, s_artist);
     }
 }
 

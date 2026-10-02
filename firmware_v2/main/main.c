@@ -171,14 +171,21 @@ static void media_changed(void)
 {
     // The toast has a fixed width, so clip long titles instead of letting the
     // label run off the round screen.
+    // The toast sits under the status pill, so keep it to one line: 20
+    // characters, cut at a word boundary where there is one.
     const char *t = media_view_title();
-    char buf[40];
-    size_t n = strnlen(t, sizeof(buf) - 1);
-    memcpy(buf, t, n);
+    char buf[24];
+    size_t n = 20;
     if (strlen(t) > n) {
-        memcpy(buf + n, "...", 4);
+        for (size_t i = n; i > 8; i--) {
+            if (t[i] == ' ') {
+                n = i;
+                break;
+            }
+        }
+        snprintf(buf, sizeof(buf), "%.*s...", (int)n, t);
     } else {
-        buf[n] = '\0';
+        snprintf(buf, sizeof(buf), "%s", t);
     }
     map_view_toast(buf);
 }
