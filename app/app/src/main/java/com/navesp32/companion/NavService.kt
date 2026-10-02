@@ -136,7 +136,8 @@ class NavService : Service() {
 
             override fun onConsentNeeded() {
                 nav?.send(
-                    OsmAndLink.NavState(false, 0, 0, "", 0, 0, "", 0, 0), noAccess = true
+                    OsmAndLink.NavState(false, 0, 0, "", 0, 0, "", 0, 0, 0.0, 0.0, false),
+                    noAccess = true
                 )
                 updateNotif("Enable Nav Companion in OsmAnd -> Plugins")
             }

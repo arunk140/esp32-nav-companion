@@ -32,6 +32,7 @@ NAV_CHR = "7c3d1f92-5a6b-4d18-9e2f-8b41c05d7a63"  # NAV_CHR_STATE_UUID
 
 STATE = 0x01
 TEXT = 0x02
+DEST = 0x03
 F_ACTIVE = 0x01
 # Our maneuver enum, index == code (ble_service.h / OsmAndLink.kt).
 MANEUVERS = [
@@ -58,6 +59,13 @@ def text_payload(name):
     return bytes([TEXT, len(b)]) + b
 
 
+def dest_payload(lat=None, lon=None):
+    # 10 B: u8 type, u8 present, i32 lat_e7, i32 lon_e7.
+    if lat is None or lon is None:
+        return struct.pack("<BBii", DEST, 0, 0, 0)
+    return struct.pack("<BBii", DEST, 1, int(lat * 1e7), int(lon * 1e7))
+
+
 async def find(timeout, addr):
     if addr:
         dev = await BleakScanner.find_device_by_address(addr, timeout=timeout)
@@ -79,10 +87,18 @@ async def send_state(c, **kw):
     await c.write_gatt_char(NAV_CHR, state_payload(**kw), response=False)
 
 
+async def send_dest(c, args):
+    if args.dest_lat is not None and args.dest_lon is not None:
+        await c.write_gatt_char(NAV_CHR, dest_payload(args.dest_lat, args.dest_lon),
+                                response=False)
+        print(f"  dest -> {args.dest_lat},{args.dest_lon}")
+
+
 async def mode_icons(c, args):
     # Every icon in the enum, so each one can be eyeballed on hardware. The
     # street label stays fixed on purpose: only the icon should change.
     await send_text(c, args.street or "Test Road")
+    await send_dest(c, args)
     for i, name in enumerate(MANEUVERS):
         await send_state(c, maneuver=i, dist=args.dist, after=(i + 1) % 14,
                          after_dist=800, remaining=5200 - i * 100,
@@ -95,6 +111,7 @@ async def mode_one(c, args):
     code = CODE[args.maneuver.upper()]
     if args.street:
         await send_text(c, args.street)
+    await send_dest(c, args)
     await send_state(c, maneuver=code, dist=args.dist, after=0, after_dist=0,
                      remaining=args.remaining, remaining_s=args.remaining_s)
     print(f"maneuver={args.maneuver.upper()}({code}) dist={args.dist} "
@@ -105,6 +122,7 @@ async def mode_one(c, args):
 async def mode_route(c, args):
     # Simulated approach: CONTINUE closing on a left turn, then next leg.
     await send_text(c, args.street or "MG Road")
+    await send_dest(c, args)
     steps = [
         ("CONTINUE", 320, "RIGHT", 450, 2500, 240),
         ("CONTINUE", 180, "RIGHT", 450, 2400, 220),
@@ -135,6 +153,7 @@ async def mode_live(c, args):
     # after STALE_MS) so it can be tapped on hardware.
     code = CODE[args.maneuver.upper()]
     await send_text(c, args.street or "MG Road")
+    await send_dest(c, args)
     t0 = time.time()
     while time.time() - t0 < args.duration:
         await send_state(c, maneuver=code, dist=args.dist, after=0, after_dist=0,
@@ -150,6 +169,10 @@ async def main():
     ap.add_argument("maneuver", nargs="?", default="CONTINUE",
                     help="for mode 'one' or 'live'")
     ap.add_argument("--street", default="")
+    ap.add_argument("--dest-lat", type=float, default=None,
+                    help="destination latitude (with --dest-lon draws a pin)")
+    ap.add_argument("--dest-lon", type=float, default=None,
+                    help="destination longitude")
     ap.add_argument("--dist", type=int, default=250)
     ap.add_argument("--remaining", type=int, default=2500)
     ap.add_argument("--remaining-s", type=int, default=180)

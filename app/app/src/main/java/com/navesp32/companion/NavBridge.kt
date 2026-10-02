@@ -26,9 +26,12 @@ class NavBridge(private val out: Out) {
         private const val TAG = "NavBridge"
         private const val STATE: Byte = 0x01
         private const val TEXT: Byte = 0x02
+        private const val DEST: Byte = 0x03
         // 1 type byte + 11 body bytes. Must match NAV_STATE_LEN in
         // firmware_v2/main/ble_service.h.
         private const val STATE_LEN = 12
+        // 1 type + 1 present + i32 lat_e7 + i32 lon_e7. Match NAV_DEST_LEN.
+        private const val DEST_LEN = 10
         private const val F_ACTIVE = 0x01
         private const val F_NO_ACCESS = 0x02
         private const val TEXT_MAX = 48
@@ -36,6 +39,9 @@ class NavBridge(private val out: Out) {
 
     private var lastStreet: String? = null
     private var sentState = false
+    private var lastDestValid = false
+    private var lastDestLat = 0
+    private var lastDestLon = 0
 
     // Sent last, so a stale value never lingers in firmware's sticky field.
     private fun clamp16(v: Int) = v.coerceIn(0, 0xFFFF).toShort()
@@ -75,6 +81,24 @@ class NavBridge(private val out: Out) {
             out.navWrite(t.array(), "navtx")
             Log.i(TAG, "street -> ${name.ifEmpty { "(none)" }}")
         }
+
+        // Destination: only on change. lat/lon quantised to 1e7 as on the wire.
+        val latE7 = Math.round(s.destLat * 1e7).toInt()
+        val lonE7 = Math.round(s.destLon * 1e7).toInt()
+        if (s.hasDest != lastDestValid || (s.hasDest &&
+                (latE7 != lastDestLat || lonE7 != lastDestLon))) {
+            lastDestValid = s.hasDest
+            lastDestLat = latE7
+            lastDestLon = lonE7
+            val d = ByteBuffer.allocate(DEST_LEN).order(ByteOrder.LITTLE_ENDIAN).apply {
+                put(DEST)
+                put(if (s.hasDest) 1 else 0)
+                putInt(if (s.hasDest) latE7 else 0)
+                putInt(if (s.hasDest) lonE7 else 0)
+            }
+            out.navWrite(d.array(), "navdest")
+            Log.i(TAG, "dest -> ${if (s.hasDest) "$latE7,$lonE7" else "(none)"}")
+        }
     }
 
     fun sendStopped() {
@@ -83,7 +107,8 @@ class NavBridge(private val out: Out) {
             OsmAndLink.NavState(
                 active = false, maneuver = 0, distanceM = 0, street = "",
                 afterManeuver = 0, afterDistanceM = 0, afterStreet = "",
-                remainingM = 0, remainingS = 0
+                remainingM = 0, remainingS = 0,
+                destLat = 0.0, destLon = 0.0, hasDest = false
             )
         )
     }
@@ -93,5 +118,8 @@ class NavBridge(private val out: Out) {
     fun reset() {
         lastStreet = null
         sentState = false
+        lastDestValid = false
+        lastDestLat = 0
+        lastDestLon = 0
     }
 }

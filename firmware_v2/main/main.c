@@ -55,16 +55,19 @@ static QueueHandle_t s_pos_q;    // latest position only (overwrite)
 static QueueHandle_t s_media_q;  // latest media state only (overwrite)
 static QueueHandle_t s_text_q;   // latest track title/artist (overwrite)
 
-// Nav STATE and TEXT arrive as separate writes, so merge them: a state that
-// lands between two text messages must not be lost, and the street name has
-// to stay sticky.
+// Nav STATE, TEXT and DEST arrive as separate writes, so merge them: a state
+// that lands between two text messages must not be lost, the street name has
+// to stay sticky, and the destination is latest-wins.
 typedef struct {
     bool have_state;
     nav_state_t st;
     char street[NAV_TEXT_MAX + 1];
     bool have_street;
+    bool have_dest;
+    bool dest_present;
+    int32_t dest_lat_e7, dest_lon_e7;
 } nav_msg_t;
-static QueueHandle_t s_nav_q;    // nav state + street (overwrite)
+static QueueHandle_t s_nav_q;    // nav state + street + destination (overwrite)
 
 typedef enum { SCREEN_NONE, SCREEN_PAIR, SCREEN_MAP, SCREEN_MEDIA } screen_t;
 static screen_t s_screen = SCREEN_NONE;
@@ -128,6 +131,16 @@ static void ble_on_nav_state(const nav_state_t *st, const char *street)
         m.have_street = true;
     }
     if (m.have_state || m.have_street) xQueueOverwrite(s_nav_q, &m);
+}
+
+static void ble_on_nav_dest(bool present, int32_t lat_e7, int32_t lon_e7)
+{
+    static nav_msg_t m;
+    m.have_dest = true;
+    m.dest_present = present;
+    m.dest_lat_e7 = lat_e7;
+    m.dest_lon_e7 = lon_e7;
+    xQueueOverwrite(s_nav_q, &m);
 }
 
 static void ble_on_link(bool up)
@@ -306,8 +319,10 @@ static void process_events(void)
             s_connected = false;
             map_view_set_link(false, settings_paired());
             media_view_set_link(false);
-            // The phone is the navigation source: no link means no guidance.
+            // The phone is the navigation source: no link means no guidance
+            // and no destination.
             nav_view_clear();
+            map_view_set_dest(false, 0, 0);
             break;
         case EV_CMD:
             handle_cmd(&ev);
@@ -318,7 +333,14 @@ static void process_events(void)
     if (xQueueReceive(s_nav_q, &nm, 0) == pdTRUE) {
         note_activity();
         if (nm.have_street) nav_view_update(NULL, nm.street);
-        if (nm.have_state) nav_view_update(&nm.st, NULL);
+        if (nm.have_state) {
+            nav_view_update(&nm.st, NULL);
+            // Navigation stopped -> the destination pin goes with it. (No
+            // point waiting for the next DEST with present=0; arrival may
+            // never send one.)
+            if (!(nm.st.flags & NAV_F_ACTIVE)) map_view_set_dest(false, 0, 0);
+        }
+        if (nm.have_dest) map_view_set_dest(nm.dest_present, nm.dest_lat_e7, nm.dest_lon_e7);
     }
     text_msg_t tm;
     if (xQueueReceive(s_text_q, &tm, 0) == pdTRUE) media_view_set_text(tm.title, tm.artist);
@@ -579,6 +601,7 @@ void app_main(void)
         .on_media_art = media_art_feed,
         .on_media_text = ble_on_media_text,
         .on_nav_state = ble_on_nav_state,
+        .on_nav_dest = ble_on_nav_dest,
     };
     nav_ble_start(&cbs, settings_device_name());
 

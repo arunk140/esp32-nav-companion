@@ -44,6 +44,7 @@
 #define COL_MISSING_D 0x14181C
 #define COL_LIVE 0x1A73E8
 #define COL_STALE 0x8A8F96
+#define COL_DEST 0xE8710A
 #define COL_GREEN 0x34A853
 #define COL_AMBER 0xF9AB00
 #define COL_GRAY 0x9AA0A6
@@ -59,6 +60,8 @@ static bool s_fix_live;     // fix received this session
 static bool s_was_live;
 static bool s_was_nav;
 static double s_mx, s_my;   // marker as displayed (animated)
+static bool s_has_dest;     // destination marker (from the phone)
+static double s_dnx, s_dny; // destination, normalized Web-Mercator
 static double s_ax, s_ay, s_bx, s_by;
 static uint32_t s_anim_t0, s_anim_dur;
 static bool s_anim;
@@ -147,17 +150,29 @@ static inline bool rotated(float rot)
     return fabsf(rot) >= 0.05f;
 }
 
+// Normalized world point -> screen for a frame drawn with origin (ox, oy) and
+// rotation rot (rotation is about the view centre). Same transform as
+// marker_screen, generalised so the destination can use it too.
+static void world_screen(double nx, double ny, int32_t ox, int32_t oy, float rot,
+                         int32_t *sx, int32_t *sy);
+
 // Marker position on screen for a frame drawn with origin (ox, oy) and
 // rotation rot (rotation is about the view centre).
 static void marker_screen(int32_t ox, int32_t oy, float rot, int32_t *sx, int32_t *sy)
 {
+    world_screen(s_mx, s_my, ox, oy, rot, sx, sy);
+}
+
+static void world_screen(double nx, double ny, int32_t ox, int32_t oy, float rot,
+                         int32_t *sx, int32_t *sy)
+{
     double w = world_px();
     if (!rotated(rot)) {
-        *sx = (int32_t)floor(s_mx * w) - ox;
-        *sy = (int32_t)floor(s_my * w) - oy;
+        *sx = (int32_t)floor(nx * w) - ox;
+        *sy = (int32_t)floor(ny * w) - oy;
         return;
     }
-    float wx = (float)((s_mx - s_cx) * w), wy = (float)((s_my - s_cy) * w);
+    float wx = (float)((nx - s_cx) * w), wy = (float)((ny - s_cy) * w);
     float r = rot * (float)M_PI / 180.0f, c = cosf(r), sn = sinf(r);
     *sx = (int32_t)lroundf(239.5f + wx * c + wy * sn);
     *sy = (int32_t)lroundf(239.5f - wx * sn + wy * c);
@@ -227,6 +242,37 @@ static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
     r.border_opa = LV_OPA_COVER;
     lv_area_t dot = {x - dr, y - dr, x + dr, y + dr};
     lv_draw_rect(layer, &r, &dot);
+}
+
+#define DEST_R 9
+#define DEST_PIN_H 16
+
+// Destination: a filled pin (disc + downward tail) with a dark ring, in a warm
+// colour so it never reads as the blue live-position marker.
+static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
+{
+    lv_color_t c = lv_color_hex(COL_DEST);
+
+    // tail: a triangle from under the disc down to a point
+    lv_draw_triangle_dsc_t t;
+    lv_draw_triangle_dsc_init(&t);
+    t.color = c;
+    t.opa = LV_OPA_COVER;
+    t.p[0].x = x - 6;            t.p[0].y = y + 2;
+    t.p[1].x = x + 6;            t.p[1].y = y + 2;
+    t.p[2].x = x;                t.p[2].y = y + DEST_PIN_H;
+    lv_draw_triangle(layer, &t);
+
+    lv_draw_rect_dsc_t r;
+    lv_draw_rect_dsc_init(&r);
+    r.radius = LV_RADIUS_CIRCLE;
+    r.bg_color = c;
+    r.bg_opa = LV_OPA_COVER;
+    r.border_color = lv_color_hex(0x000000);
+    r.border_width = 2;
+    r.border_opa = LV_OPA_COVER;
+    lv_area_t disc = {x - DEST_R, y - DEST_R - 4, x + DEST_R, y + DEST_R - 4};
+    lv_draw_rect(layer, &r, &disc);
 }
 
 typedef struct {
@@ -563,6 +609,14 @@ static void draw_cb(lv_event_t *e)
 {
     lv_layer_t *layer = lv_event_get_layer(e);
     int32_t sx = 0, sy = 0;
+    // Destination first: the live-position marker draws over it if they meet.
+    if (s_has_dest) {
+        int32_t dx, dy;
+        world_screen(s_dnx, s_dny, s_f_ox, s_f_oy, s_f_rot, &dx, &dy);
+        if (dx > -40 && dx < BOARD_LCD_W + 40 && dy > -40 && dy < BOARD_LCD_H + 40) {
+            draw_dest(layer, dx, dy);
+        }
+    }
     if (s_has_fix) {
         marker_screen(s_f_ox, s_f_oy, s_f_rot, &sx, &sy);
         if (sx > -40 && sx < BOARD_LCD_W + 40 && sy > -40 && sy < BOARD_LCD_H + 40) {
@@ -1044,6 +1098,23 @@ void map_view_set_fix(int32_t lat_e7, int32_t lon_e7, uint16_t speed_cms, uint16
     s_fix_lat = lat_e7;
     s_fix_lon = lon_e7;
     s_pos_dirty = true;
+}
+
+void map_view_set_dest(bool valid, int32_t lat_e7, int32_t lon_e7)
+{
+    if (!valid) {
+        if (!s_has_dest) return;
+        s_has_dest = false;
+        invalidate();
+        return;
+    }
+    double nx = lon_to_nx(lon_e7 / 1e7), ny = lat_to_ny(lat_e7 / 1e7);
+    // Skip a repaint if it has not moved (sent only on change, but be sure).
+    if (s_has_dest && fabs(nx - s_dnx) < 1e-9 && fabs(ny - s_dny) < 1e-9) return;
+    s_dnx = nx;
+    s_dny = ny;
+    s_has_dest = true;
+    invalidate();
 }
 
 void map_view_flush_state(void)

@@ -47,6 +47,9 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
         val afterStreet: String,
         val remainingM: Int,
         val remainingS: Int,
+        val destLat: Double,      // destination; valid only when hasDest
+        val destLon: Double,
+        val hasDest: Boolean,
     )
 
     // Our own maneuver vocabulary, deliberately NOT OsmAnd's TurnType numbering:
@@ -360,12 +363,14 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
             if (lastActive && now - lastSeenActiveMs < NONE_DEBOUNCE_MS) return
             if (lastActive) {
                 lastActive = false
-                cb.onNavState(NavState(false, NAV_NONE, 0, "", NAV_NONE, 0, "", 0, 0))
+                cb.onNavState(NavState(false, NAV_NONE, 0, "", NAV_NONE, 0, "", 0, 0,
+                    0.0, 0.0, false))
             }
             return
         }
         lastActive = true
         lastSeenActiveMs = android.os.SystemClock.elapsedRealtime()
+        val dest = info.destinationLocation
         val s = NavState(
             active = true,
             maneuver = mapType(turn),
@@ -376,6 +381,9 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
             afterStreet = bStr(t, "after_nextturn_name"),
             remainingM = info.leftDistance,
             remainingS = info.leftTime,
+            destLat = dest?.latitude ?: 0.0,
+            destLon = dest?.longitude ?: 0.0,
+            hasDest = dest != null,
         )
         Log.i(TAG, "nav: $s")
         cb.onNavState(s)

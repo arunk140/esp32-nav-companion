@@ -17,6 +17,8 @@ bool map_view_active(void);
 void map_view_tick(void);
 
 void map_view_set_fix(int32_t lat_e7, int32_t lon_e7, uint16_t speed_cms, uint16_t cog_cdeg);
+// Destination pin. Call with valid == false to clear it.
+void map_view_set_dest(bool valid, int32_t lat_e7, int32_t lon_e7);
 void map_view_set_link(bool connected, bool paired);
 float map_view_rotation(void);  // deg, 0 = north-up
 

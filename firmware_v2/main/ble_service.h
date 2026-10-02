@@ -36,6 +36,8 @@
 //        (metres / seconds, clamped to u16)
 //   0x02 TEXT: u8 type, u8 len, street-name bytes (Latin-1; the device drops
 //        anything it cannot draw, like the media title)
+//   0x03 DEST (10 B): u8 type, u8 present, i32 lat_e7, i32 lon_e7. Sent only
+//        when the destination changes; present=0 clears the marker.
 // Maneuver codes are OUR enum (NAV_* below), deliberately not OsmAnd's
 // TurnType numbering: that is an implementation detail of another project.
 #define NAV_CHR_STATE_UUID "7c3d1f92-5a6b-4d18-9e2f-8b41c05d7a63"
@@ -43,7 +45,9 @@
                                        0x18, 0x4d, 0x6b, 0x5a, 0x92, 0x1f, 0x3d, 0x7c
 #define NAV_STATE 0x01
 #define NAV_TEXT 0x02
+#define NAV_DEST 0x03
 #define NAV_STATE_LEN 12
+#define NAV_DEST_LEN 10
 #define NAV_TEXT_MAX 48
 #define NAV_F_ACTIVE 0x01   // navigation is running
 #define NAV_F_NO_ACCESS 0x02 // app could not read OsmAnd
@@ -155,6 +159,9 @@ typedef struct {
     // Navigation: NAV_STATE decoded (st may be NULL when only TEXT arrived,
     // because the two are separate writes); street may be empty.
     void (*on_nav_state)(const nav_state_t *st, const char *street);
+    // Destination for the map marker. present=false means "no destination"
+    // (navigation ended): clear it.
+    void (*on_nav_dest)(bool present, int32_t lat_e7, int32_t lon_e7);
 } nav_ble_cbs_t;
 
 void nav_ble_start(const nav_ble_cbs_t *cbs, const char *device_name);

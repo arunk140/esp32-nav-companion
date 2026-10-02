@@ -169,6 +169,11 @@ static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
         memcpy(street, b + 2, n);
         street[n] = '\0';
         if (s_cbs.on_nav_state) s_cbs.on_nav_state(NULL, street);
+    } else if (b[0] == NAV_DEST) {
+        if (len < NAV_DEST_LEN) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        if (s_cbs.on_nav_dest) {
+            s_cbs.on_nav_dest(b[1] != 0, (int32_t)le32(b + 2), (int32_t)le32(b + 6));
+        }
     }
     return 0;
 }
