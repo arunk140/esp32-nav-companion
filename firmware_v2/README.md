@@ -104,6 +104,17 @@ BLE extension (existing UUIDs unchanged, mirrored in `BleManager.kt` / `MediaBri
 - **App requirement:** Notification access, needed by Android to read other apps' media sessions. The *Enable media controls* button opens the setting.
 - **Art sources:** metadata bitmap, `content://` URIs, or `https://` URLs. Media3-based players publish the URL first and the bitmap later; each new source is tried until one works.
 
+## Map theme
+
+The map can be light or dark. Dark is **hue-preserving**: each tile's lightness flips and every colour channel keeps 60% of its offset from the old lightness, so water stays blue and parks stay green instead of turning into a photo negative (`CHROMA_MUL` in `tiles.c` tunes how much colour survives). The inversion runs in the tile loader as tiles are read, so the render path is untouched.
+
+- `CMD 0x08 set_theme <u8>`: 0 light, 1 dark, on the existing CMD characteristic — no new UUIDs, no re-pairing. Persisted in NVS and restored at boot, so the board comes up in the chosen theme after a deep-sleep wake with no help from the phone.
+- `NAV_DARK_MAP` (menuconfig, default y) is only the first-boot default; the stored preference wins after that.
+- Switching drops every cached tile so they come back in the new theme. The theme is sampled when the loader *reads* a tile, not when it is queued, and a tile whose theme went stale mid-read is discarded rather than shown — the same mechanism a zoom change uses.
+- Placeholder fills for loading/missing tiles follow the theme, so a dark map isn't speckled with light blocks.
+- **Map tiles only.** Buttons, the status pill, toasts, the media page and the pairing screen keep their light look. The QR block in particular must stay light: inverted QR codes often fail to scan.
+- The app has a *Dark map* switch beside brightness. It pushes the stored value on connect, and the device reports its actual theme back in byte 4 of STATUS, so the switch follows the device instead of assuming.
+
 ## Power management
 
 Sleep is decided by the phone link, not by a timer alone:
