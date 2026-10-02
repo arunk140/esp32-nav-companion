@@ -271,11 +271,12 @@ void nav_view_set_click_cb(void (*cb)(void))
     s_click_cb = cb;
 }
 
-static lv_obj_t *mk_label(lv_obj_t *parent, const lv_font_t *font, uint32_t col, int y)
+static lv_obj_t *mk_label(lv_obj_t *parent, const lv_font_t *font, uint32_t col, int y,
+                          lv_label_long_mode_t mode)
 {
     lv_obj_t *l = lv_label_create(parent);
     lv_obj_set_width(l, TEXT_W);
-    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(l, mode);
     lv_obj_set_style_text_font(l, font, 0);
     lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
     lv_obj_align(l, LV_ALIGN_TOP_LEFT, TEXT_X, y);  // banner-local
@@ -296,9 +297,14 @@ void nav_view_init(void)
     lv_obj_add_event_cb(s_banner, banner_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_banner, banner_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
 
-    s_lbl_street = mk_label(s_banner, &lv_font_montserrat_20, COL_STREET, 10);
-    s_lbl_dist = mk_label(s_banner, &lv_font_montserrat_28, COL_ICON, 40);
-    s_lbl_left = mk_label(s_banner, &lv_font_montserrat_14, COL_DIST, 52);
+    // Street name is a single line that scrolls (ping-pong) only when it is
+    // too long for the column; short names stay put. Distance/remaining clip.
+    s_lbl_street = mk_label(s_banner, &lv_font_montserrat_20, COL_STREET, 10,
+                            LV_LABEL_LONG_SCROLL);
+    s_lbl_dist = mk_label(s_banner, &lv_font_montserrat_28, COL_ICON, 40,
+                          LV_LABEL_LONG_DOT);
+    s_lbl_left = mk_label(s_banner, &lv_font_montserrat_14, COL_DIST, 52,
+                          LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_left, "");
     // The box is right-aligned, but the text inside defaults to left-aligned
     // and would draw at the same x as the big distance, overlapping it.
