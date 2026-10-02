@@ -365,6 +365,13 @@ void nav_view_update(const nav_state_t *st, const char *street)
     refresh();
 }
 
+// Re-evaluate visibility on the GUI loop. refresh() is idempotent and only
+// touches the banner when it is built.
+void nav_view_tick(void)
+{
+    refresh();
+}
+
 bool nav_view_active(void)
 {
     return s_have && (s_st.flags & NAV_F_ACTIVE) && (now_ms() - s_last_ms) < STALE_MS;

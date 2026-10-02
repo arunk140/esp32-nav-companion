@@ -1264,6 +1264,7 @@ void map_view_tick(void)
         s_was_nav = nav_on;
         update_buttons();
     }
+    nav_view_tick();  // staleness must hide the banner even without a stop message
     // Cheap: update_status() early-returns unless the state or ETA minute
     // changed. Needed here so the ETA counts down while everything else is
     // steady.

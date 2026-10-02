@@ -17,6 +17,10 @@ void nav_view_destroy(void);
 // Latest state; call on every loop from any screen. Hidden while inactive.
 void nav_view_update(const nav_state_t *st, const char *street);
 
+// Call every GUI loop so the banner's staleness is re-evaluated even when no
+// further state arrives (a stop then silence must still hide it).
+void nav_view_tick(void);
+
 // True once a live instruction has arrived; the map screen uses it to swap
 // the status pill for the banner.
 bool nav_view_active(void);
