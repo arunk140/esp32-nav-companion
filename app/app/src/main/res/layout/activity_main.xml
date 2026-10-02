@@ -55,6 +55,23 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 
+    <TextView
+        android:id="@+id/navDump"
+        android:text=""
+        android:textSize="13sp"
+        android:padding="12dp"
+        android:layout_marginTop="12dp"
+        android:background="#EEEEEE"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <Button
+        android:id="@+id/btnProbeOsmand"
+        android:text="Probe OsmAnd"
+        android:layout_marginTop="12dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
     <Button
         android:id="@+id/btnSleep"
         android:text="Sleep device (wake with touch)"

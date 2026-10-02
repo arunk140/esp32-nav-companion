@@ -1,4 +1,5 @@
 #include "map_view.h"
+#include "nav_view.h"
 #include "board.h"
 #include "display.h"
 #include "ui_common.h"
@@ -56,6 +57,7 @@ static bool s_follow = true;
 static bool s_has_fix;      // any fix (incl. restored from NVS)
 static bool s_fix_live;     // fix received this session
 static bool s_was_live;
+static bool s_was_nav;
 static double s_mx, s_my;   // marker as displayed (animated)
 static double s_ax, s_ay, s_bx, s_by;
 static uint32_t s_anim_t0, s_anim_dur;
@@ -635,7 +637,9 @@ static void update_buttons(void)
     } else {
         lv_obj_remove_state(s_btn_out, LV_STATE_DISABLED);
     }
-    lv_obj_set_hidden(s_btn_center, s_follow);
+    // Recentre only matters while browsing; during navigation the banner owns
+    // that area of the screen.
+    lv_obj_set_hidden(s_btn_center, s_follow || nav_view_active());
 }
 
 static void show_toast(const char *txt)
@@ -1084,6 +1088,12 @@ void map_view_tick(void)
         } else {
             s_rot = wrap180(s_rot + d * (1.0f - expf(-dt * ROT_RATE)));
         }
+    }
+
+    bool nav_on = nav_view_active();
+    if (nav_on != s_was_nav) {
+        s_was_nav = nav_on;
+        update_buttons();
     }
 
     bool live = fix_is_live();

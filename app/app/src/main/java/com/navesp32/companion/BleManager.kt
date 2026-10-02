@@ -41,6 +41,7 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         const val STATUS_UUID = "d7865290-9778-45bd-8faa-c3f5674b2457"
         const val MEDIA_INFO_UUID = "790d1d86-2191-404d-a0f5-0e960990e190"
         const val MEDIA_CMD_UUID = "f8a580f6-aa84-4898-ad67-a66c12262ac1"
+        const val NAV_STATE_UUID = "7c3d1f92-5a6b-4d18-9e2f-8b41c05d7a63"
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         const val CMD_RECENTER: Byte = 0x01
@@ -56,6 +57,10 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         const val MAX_WRITE = 253
 
         private const val TAG = "BleManager"
+        private val REQUIRED = listOf(
+            POSITION_UUID, CMD_UUID, STATUS_UUID, MEDIA_INFO_UUID, MEDIA_CMD_UUID, NAV_STATE_UUID
+        )
+
         private const val OP_TIMEOUT_MS = 3000L
         private const val BUSY_RETRY_MS = 15L
 
@@ -333,10 +338,13 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
             g.disconnect()
             return
         }
-        if (chr(MEDIA_INFO_UUID) == null && !cacheRefreshed) {
-            // Stale GATT cache from older firmware: drop it and look again.
+        // Any characteristic we require missing means a stale GATT cache from
+        // older firmware (we add characteristics over time). Drop the cache and
+        // look again. Checking only one of them hid a missing nav channel.
+        val missing = REQUIRED.filter { chr(it) == null }
+        if (missing.isNotEmpty() && !cacheRefreshed) {
             cacheRefreshed = true
-            Log.i(TAG, "media characteristics missing: refreshing GATT cache")
+            Log.i(TAG, "missing $missing: refreshing GATT cache")
             refreshCache(g)
             handler.postDelayed({ rediscover(g) }, 500)
             return
@@ -415,7 +423,15 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
     private fun write(uuid: String, payload: ByteArray, tag: String?): Boolean {
         if (gatt == null) return false
         handler.post {
-            if (chr(uuid) != null) enqueue(Op.Write(UUID.fromString(uuid), payload, tag))
+            val u = UUID.fromString(uuid)
+            val c = chr(u)
+            if (c == null) {
+                // Usually a GATT cache from before a firmware update. Silent
+                // drops here are very hard to spot from the device side.
+                Log.w(TAG, "write dropped: $u not in service (${payload.size} B)")
+            } else {
+                enqueue(Op.Write(u, payload, tag))
+            }
         }
         return true
     }
@@ -437,6 +453,8 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
 
     // tag != null coalesces (media STATE); art chunks pass null to keep all.
     fun writeMedia(payload: ByteArray, tag: String?) = write(MEDIA_INFO_UUID, payload, tag)
+
+    fun writeNav(payload: ByteArray, tag: String?) = write(NAV_STATE_UUID, payload, tag)
 
     fun maxWrite(): Int = minOf(mtu - 3, MAX_WRITE)
 

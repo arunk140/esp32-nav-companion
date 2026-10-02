@@ -28,6 +28,42 @@
 #define NAV_CHR_MEDIA_CMD_UUID_LE 0xc1, 0x2a, 0x26, 0x12, 0x6c, 0xa6, 0x67, 0xad, \
                                   0x98, 0x48, 0x84, 0xaa, 0xf6, 0x80, 0xa5, 0xf8
 
+// Turn-by-turn navigation, fed by OsmAnd's AIDL API on the phone. The phone
+// owns routing and the instruction text; the device owns the map and the
+// maneuver icons.
+//   0x01 STATE (12 B incl. the type byte): u8 flags, u8 maneuver, u16 dist_m,
+//        u8 after_maneuver, u16 after_dist_m, u16 remaining_m, u16 remaining_s
+//        (metres / seconds, clamped to u16)
+//   0x02 TEXT: u8 type, u8 len, street-name bytes (Latin-1; the device drops
+//        anything it cannot draw, like the media title)
+// Maneuver codes are OUR enum (NAV_* below), deliberately not OsmAnd's
+// TurnType numbering: that is an implementation detail of another project.
+#define NAV_CHR_STATE_UUID "7c3d1f92-5a6b-4d18-9e2f-8b41c05d7a63"
+#define NAV_CHR_STATE_UUID_LE 0x63, 0x7a, 0x5d, 0xc0, 0x41, 0x8b, 0x2f, 0x9e, \
+                                       0x18, 0x4d, 0x6b, 0x5a, 0x92, 0x1f, 0x3d, 0x7c
+#define NAV_STATE 0x01
+#define NAV_TEXT 0x02
+#define NAV_STATE_LEN 12
+#define NAV_TEXT_MAX 48
+#define NAV_F_ACTIVE 0x01   // navigation is running
+#define NAV_F_NO_ACCESS 0x02 // app could not read OsmAnd
+
+#define NAV_NONE 0
+#define NAV_CONTINUE 1
+#define NAV_SLIGHT_LEFT 2
+#define NAV_LEFT 3
+#define NAV_SHARP_LEFT 4
+#define NAV_SLIGHT_RIGHT 5
+#define NAV_RIGHT 6
+#define NAV_SHARP_RIGHT 7
+#define NAV_KEEP_LEFT 8
+#define NAV_KEEP_RIGHT 9
+#define NAV_UTURN 10
+#define NAV_ROUNDABOUT 11
+#define NAV_OFF_ROUTE 12
+#define NAV_ARRIVE 13
+#define NAV_MANEUVER_MAX NAV_ARRIVE
+
 // MEDIA_INFO (phone -> device, write / write-no-rsp), little-endian:
 //   0x01 STATE (13 B): u8 type, u8 flags, u8 volume 0-100, u32 position ms,
 //                      u32 duration ms (0 = unknown), u16 art id (0 = none)
@@ -94,6 +130,16 @@ typedef struct {
     uint16_t art_id;
 } nav_media_state_t;
 
+typedef struct {
+    uint8_t flags;             // NAV_F_*
+    uint8_t maneuver;          // NAV_*
+    uint16_t dist_m;           // to the maneuver
+    uint8_t after_maneuver;
+    uint16_t after_dist_m;
+    uint16_t remaining_m;
+    uint16_t remaining_s;
+} nav_state_t;
+
 // All callbacks run in the NimBLE host task: copy and return. Never call
 // LVGL or write NVS from them.
 typedef struct {
@@ -105,6 +151,10 @@ typedef struct {
     void (*on_media_art)(const uint8_t *data, size_t len);
     // Title and artist of the current track, NUL-separated.
     void (*on_media_text)(const char *title, const char *artist);
+
+    // Navigation: NAV_STATE decoded (st may be NULL when only TEXT arrived,
+    // because the two are separate writes); street may be empty.
+    void (*on_nav_state)(const nav_state_t *st, const char *street);
 } nav_ble_cbs_t;
 
 void nav_ble_start(const nav_ble_cbs_t *cbs, const char *device_name);

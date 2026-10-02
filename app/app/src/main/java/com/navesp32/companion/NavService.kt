@@ -74,6 +74,8 @@ class NavService : Service() {
     private var ble: BleManager? = null
     private var loc: LocationStream? = null
     private var media: MediaBridge? = null
+    private var nav: NavBridge? = null
+    private var osmand: OsmAndLink? = null
     private var connected = false
     private val main = Handler(Looper.getMainLooper())
 
@@ -120,6 +122,29 @@ class NavService : Service() {
         )
         registerReceiver(bondRx, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
         registerReceiver(adapterRx, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+        nav = NavBridge(object : NavBridge.Out {
+            override fun navWrite(data: ByteArray, tag: String?) {
+                ble?.writeNav(data, tag)
+            }
+
+            override fun navLinkReady() = ble?.mediaReady == true
+        })
+        osmand = OsmAndLink(this, object : OsmAndLink.Cb {
+            override fun onNavState(s: OsmAndLink.NavState) {
+                nav?.send(s)
+            }
+
+            override fun onConsentNeeded() {
+                nav?.send(
+                    OsmAndLink.NavState(false, 0, 0, "", 0, 0, "", 0, 0), noAccess = true
+                )
+                updateNotif("Enable Nav Companion in OsmAnd -> Plugins")
+            }
+
+            override fun onLinkState(bound: Boolean) {
+                if (!bound) nav?.sendStopped()
+            }
+        })
         media = MediaBridge(this, object : MediaBridge.Out {
             override fun mediaWrite(data: ByteArray, tag: String?) {
                 ble?.writeMedia(data, tag)
@@ -141,6 +166,7 @@ class NavService : Service() {
         }
         loc?.stop()
         media?.stop()
+        osmand?.stop()
         ble?.disconnect()
         super.onDestroy()
     }
@@ -153,6 +179,7 @@ class NavService : Service() {
                 asleep = false
                 loc?.stop()
                 media?.stop()
+                osmand?.stop()
                 ble?.disconnect()
                 setState(OFFLINE)
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -240,6 +267,9 @@ class NavService : Service() {
                 override fun onMediaReady() {
                     media?.start()
                     media?.sendAll()
+                    // Turn-by-turn only makes sense over an up link, and
+                    // binding OsmAnd while asleep is wasteful.
+                    osmand?.start()
                 }
 
                 override fun onMediaCmd(cmd: ByteArray) {

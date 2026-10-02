@@ -29,7 +29,13 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        // Needed for the vendored OsmAnd AIDL client: its interfaces are
+        // .aidl files in our own package namespace (net.osmand.aidlapi.*),
+        // not a library dependency.
+        aidl = true
     }
+
+    sourceSets["main"].aidl.srcDir("src/main/java")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

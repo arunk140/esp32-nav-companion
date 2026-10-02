@@ -135,6 +135,45 @@ static const ble_uuid128_t s_svc_uuid = BLE_UUID128_INIT(NAV_SVC_UUID_LE);
 static const ble_uuid128_t s_pos_uuid = BLE_UUID128_INIT(NAV_CHR_POSITION_UUID_LE);
 static const ble_uuid128_t s_cmd_uuid = BLE_UUID128_INIT(NAV_CHR_CMD_UUID_LE);
 static const ble_uuid128_t s_status_uuid = BLE_UUID128_INIT(NAV_CHR_STATUS_UUID_LE);
+static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn;
+    (void)attr;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    uint8_t b[NAV_TEXT_MAX + 2];
+    if (len < 1 || len > sizeof(b)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    if (ble_hs_mbuf_to_flat(ctxt->om, b, sizeof(b), NULL) != 0) return BLE_ATT_ERR_UNLIKELY;
+    if (b[0] == NAV_STATE) {
+        if (len < NAV_STATE_LEN) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        nav_state_t st = {
+            .flags = b[0 + 1],
+            .maneuver = b[2],
+            .dist_m = le16(b + 3),
+            .after_maneuver = b[5],
+            .after_dist_m = le16(b + 6),
+            .remaining_m = le16(b + 8),
+            .remaining_s = le16(b + 10),
+        };
+        // STATE carries no street name: pass NULL so the GUI keeps the last
+        // TEXT it saw. STATE and TEXT are separate writes and STATE fires ~1 Hz,
+        // so passing an empty string here would wipe the sticky name every tick.
+        if (s_cbs.on_nav_state) s_cbs.on_nav_state(&st, NULL);
+    } else if (b[0] == NAV_TEXT) {
+        if (len < 2) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        // b[1] is the sender's length; never read past what actually arrived.
+        size_t n = b[1] < NAV_TEXT_MAX ? b[1] : NAV_TEXT_MAX;
+        if (n > (size_t)(len - 2)) n = (size_t)(len - 2);
+        char street[NAV_TEXT_MAX + 1] = {0};
+        memcpy(street, b + 2, n);
+        street[n] = '\0';
+        if (s_cbs.on_nav_state) s_cbs.on_nav_state(NULL, street);
+    }
+    return 0;
+}
+
+static const ble_uuid128_t s_nav_state_uuid = BLE_UUID128_INIT(NAV_CHR_STATE_UUID_LE);
 static const ble_uuid128_t s_media_info_uuid = BLE_UUID128_INIT(NAV_CHR_MEDIA_INFO_UUID_LE);
 static const ble_uuid128_t s_media_cmd_uuid = BLE_UUID128_INIT(NAV_CHR_MEDIA_CMD_UUID_LE);
 
@@ -169,6 +208,11 @@ static const struct ble_gatt_svc_def s_svcs[] = {
                 .access_cb = chr_media_cmd,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &s_media_cmd_h,
+            },
+            {
+                .uuid = &s_nav_state_uuid.u,
+                .access_cb = chr_nav_state,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {0},
         },

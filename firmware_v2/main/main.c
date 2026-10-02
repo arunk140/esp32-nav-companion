@@ -24,6 +24,7 @@
 #include "map_view.h"
 #include "media_art.h"
 #include "media_view.h"
+#include "nav_view.h"
 #include "sdcard.h"
 #include "settings.h"
 #include "tiles.h"
@@ -53,6 +54,17 @@ static QueueHandle_t s_ev_q;   // commands + link changes, in order
 static QueueHandle_t s_pos_q;    // latest position only (overwrite)
 static QueueHandle_t s_media_q;  // latest media state only (overwrite)
 static QueueHandle_t s_text_q;   // latest track title/artist (overwrite)
+
+// Nav STATE and TEXT arrive as separate writes, so merge them: a state that
+// lands between two text messages must not be lost, and the street name has
+// to stay sticky.
+typedef struct {
+    bool have_state;
+    nav_state_t st;
+    char street[NAV_TEXT_MAX + 1];
+    bool have_street;
+} nav_msg_t;
+static QueueHandle_t s_nav_q;    // nav state + street (overwrite)
 
 typedef enum { SCREEN_NONE, SCREEN_PAIR, SCREEN_MAP, SCREEN_MEDIA } screen_t;
 static screen_t s_screen = SCREEN_NONE;
@@ -104,6 +116,20 @@ static void ble_on_media_text(const char *title, const char *artist)
     xQueueOverwrite(s_text_q, &m);
 }
 
+static void ble_on_nav_state(const nav_state_t *st, const char *street)
+{
+    static nav_msg_t m;
+    if (st) {
+        m.st = *st;
+        m.have_state = true;
+    }
+    if (street) {
+        snprintf(m.street, sizeof(m.street), "%s", street);
+        m.have_street = true;
+    }
+    if (m.have_state || m.have_street) xQueueOverwrite(s_nav_q, &m);
+}
+
 static void ble_on_link(bool up)
 {
     app_ev_t ev = {.type = up ? EV_LINK_UP : EV_LINK_DOWN};
@@ -121,6 +147,7 @@ static void show_screen(screen_t which)
     lv_obj_t *scr = lv_screen_active();
     map_view_destroy();
     media_view_destroy();
+    nav_view_destroy();
     lv_obj_clean(scr);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     if (which == SCREEN_PAIR) {
@@ -130,6 +157,7 @@ static void show_screen(screen_t which)
     } else {
         map_view_create(scr);
         map_view_set_link(s_connected, settings_paired());
+        nav_view_init();  // banner reappears if navigation is already live
     }
     s_screen = which;
 }
@@ -283,6 +311,12 @@ static void process_events(void)
             handle_cmd(&ev);
             break;
         }
+    }
+    nav_msg_t nm;
+    if (xQueueReceive(s_nav_q, &nm, 0) == pdTRUE) {
+        note_activity();
+        if (nm.have_street) nav_view_update(NULL, nm.street);
+        if (nm.have_state) nav_view_update(&nm.st, NULL);
     }
     text_msg_t tm;
     if (xQueueReceive(s_text_q, &tm, 0) == pdTRUE) media_view_set_text(tm.title, tm.artist);
@@ -521,6 +555,9 @@ void app_main(void)
     map_view_set_reset_cb(local_reset);
     map_view_set_media_cb(open_media);
     map_view_set_sleep_cb(enter_deep_sleep);
+    // Tapping the nav banner re-centres, same as the recentre button (which is
+    // hidden while the banner is up).
+    nav_view_set_click_cb(map_view_recenter);
     media_view_set_change_cb(media_changed);
     media_art_init();
 
@@ -528,6 +565,7 @@ void app_main(void)
     s_pos_q = xQueueCreate(1, sizeof(nav_position_t));
     s_media_q = xQueueCreate(1, sizeof(nav_media_state_t));
     s_text_q = xQueueCreate(1, sizeof(text_msg_t));
+    s_nav_q = xQueueCreate(1, sizeof(nav_msg_t));
 
     show_screen(settings_paired() ? SCREEN_MAP : SCREEN_PAIR);
 
@@ -538,6 +576,7 @@ void app_main(void)
         .on_media_state = ble_on_media_state,
         .on_media_art = media_art_feed,
         .on_media_text = ble_on_media_text,
+        .on_nav_state = ble_on_nav_state,
     };
     nav_ble_start(&cbs, settings_device_name());
 

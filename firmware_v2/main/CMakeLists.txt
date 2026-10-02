@@ -13,6 +13,7 @@ idf_component_register(
     "ble_nav.c"
     "media_art.c"
     "media_view.c"
+    "nav_view.c"
     "ui_common.c"
   INCLUDE_DIRS "."
   REQUIRES

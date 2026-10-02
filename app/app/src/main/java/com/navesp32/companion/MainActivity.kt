@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     // Set while refresh() writes the switch, so its listener does not fire a
     // command straight back at the device.
     private var updating = false
+    private var osmand: OsmAndLink? = null
 
     private val stateRx = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) = refresh()
@@ -76,6 +77,31 @@ class MainActivity : AppCompatActivity() {
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
+        }
+        b.btnProbeOsmand.setOnClickListener {
+            if (osmand != null) {
+                toast("Reading OsmAnd...")
+                b.navDump.text = "reading..."
+                osmand!!.pollNow { text -> b.navDump.text = text }
+            } else {
+                toast("Connecting to OsmAnd...")
+                osmand = OsmAndLink(this, object : OsmAndLink.Cb {
+                    override fun onNavState(s: OsmAndLink.NavState) {
+                        b.navDump.text =
+                            "active=${s.active}\nturn=${s.maneuver} in ${s.distanceM} m\n" +
+                                "into: ${s.street}\nthen ${s.afterManeuver} in ${s.afterDistanceM} m\n" +
+                                "${s.remainingM} m / ${s.remainingS} s left"
+                    }
+
+                    override fun onConsentNeeded() {
+                        b.navDump.text = "OsmAnd has us disabled:\nenable this app in\nOsmAnd -> Plugins"
+                    }
+
+                    override fun onLinkState(bound: Boolean) {
+                        if (!bound) b.navDump.text = "OsmAnd not reachable"
+                    }
+                }).also { it.start() }
+            }
         }
         b.darkMapToggle.setOnCheckedChangeListener { _, on ->
             if (updating) return@setOnCheckedChangeListener
@@ -138,6 +164,8 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.w(TAG, "stateRx: $e")
         }
+        osmand?.stop()
+        osmand = null
         super.onDestroy()
     }
 

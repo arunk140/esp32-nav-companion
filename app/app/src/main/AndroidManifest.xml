@@ -13,6 +13,17 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
+    <!-- Android 11+ package visibility: without these, bindService() to
+         OsmAnd fails even when it is installed. -->
+    <queries>
+        <package android:name="net.osmand.plus" />
+        <package android:name="net.osmand" />
+        <package android:name="net.osmand.dev" />
+        <intent>
+            <action android:name="net.osmand.aidl.OsmandAidlServiceV2" />
+        </intent>
+    </queries>
+
     <application
         android:label="Nav Companion"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar">
