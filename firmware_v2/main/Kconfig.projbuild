@@ -1,0 +1,28 @@
+menu "Nav v2 options"
+
+config NAV_DEBUG_STATS
+    bool "Print render/tile/heap stats every 5 s (WARN level)"
+    default n
+    help
+        Dev aid only. Keep off for normal use: the USB-serial console can
+        block when no reader is attached.
+
+config NAV_DEBUG_BLE
+    bool "Log BLE connect/security events (WARN level)"
+    default n
+
+config NAV_DEBUG_DEMO_WALK
+    bool "Simulate GPS fixes (bench test, no phone needed)"
+    default n
+
+config NAV_TILE_CACHE_SLOTS
+    int "Tile cache slots (128 KiB PSRAM each)"
+    range 12 40
+    default 28
+
+config NAV_LCD_PCLK_MHZ
+    int "LCD pixel clock (MHz)"
+    range 12 24
+    default 18
+
+endmenu

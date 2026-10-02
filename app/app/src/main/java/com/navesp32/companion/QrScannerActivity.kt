@@ -93,7 +93,7 @@ class QrScannerActivity : AppCompatActivity() {
             Prefs.setServiceEnabled(this, true)
             done = true
             Log.i(TAG, "bond saved $name $mac")
-            NavService.start(this)
+            NavService.start(this, fresh = true)
             finish()
             return true
         } catch (e: Exception) {

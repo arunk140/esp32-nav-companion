@@ -56,6 +56,11 @@ class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Cancel", null)
                 .show()
         }
+        b.btnMedia.setOnClickListener {
+            // Media sessions of other apps are only readable with
+            // Notification access; Android has no runtime prompt for it.
+            startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }
         b.serviceToggle.setOnCheckedChangeListener { _, on ->
             if (on) {
                 Prefs.setServiceEnabled(this, true)
@@ -100,6 +105,8 @@ class MainActivity : AppCompatActivity() {
         b.serviceToggle.isChecked = Prefs.serviceEnabled(this, bond != null)
         b.btnConnect.isEnabled = bond != null
         b.btnUnpair.isEnabled = bond != null
+        val media = MediaListenerService.hasAccess(this)
+        b.btnMedia.text = if (media) "Media controls: enabled" else "Enable media controls"
     }
 
     private fun hasCam() = ActivityCompat.checkSelfPermission(

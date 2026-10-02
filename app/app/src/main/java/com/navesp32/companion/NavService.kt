@@ -5,12 +5,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
@@ -25,12 +28,16 @@ class NavService : Service() {
         const val ACTION_UNPAIR = "com.navesp32.companion.UNPAIR"
         const val ACTION_BRIGHTNESS = "com.navesp32.companion.BRIGHTNESS"
         const val EXTRA_BRIGHTNESS = "brightness"
+        const val EXTRA_FRESH = "fresh"
         private const val CH = "nav"
         private const val NOTIF_ID = 41
         private const val TAG = "NavService"
 
-        fun start(ctx: Context) {
-            ctx.startForegroundService(Intent(ctx, NavService::class.java).setAction(ACTION_START))
+        fun start(ctx: Context, fresh: Boolean = false) {
+            ctx.startForegroundService(
+                Intent(ctx, NavService::class.java).setAction(ACTION_START)
+                    .putExtra(EXTRA_FRESH, fresh)
+            )
         }
 
         fun stop(ctx: Context) {
@@ -40,7 +47,9 @@ class NavService : Service() {
 
     private var ble: BleManager? = null
     private var loc: LocationStream? = null
+    private var media: MediaBridge? = null
     private var connected = false
+    private val main = Handler(Looper.getMainLooper())
 
     private val bondRx = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -53,6 +62,28 @@ class NavService : Service() {
         }
     }
 
+    // A Bluetooth off/on (toggle, airplane mode) kills the GATT client and
+    // autoConnect never recovers: rebuild the connection once the adapter is on.
+    private val adapterRx = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
+                BluetoothAdapter.STATE_TURNING_OFF -> {
+                    Log.i(TAG, "bluetooth turning off")
+                    loc?.stop()
+                    ble?.disconnect()
+                }
+                BluetoothAdapter.STATE_ON -> {
+                    val bond = Prefs.loadBond(this@NavService) ?: return
+                    if (!Prefs.serviceEnabled(this@NavService)) return
+                    Log.i(TAG, "bluetooth on: reconnecting")
+                    ble?.disconnect()
+                    main.postDelayed({ ble?.connect(bond.mac, bond.token) }, 1000)
+                    updateNotif("Connecting…")
+                }
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -62,15 +93,28 @@ class NavService : Service() {
             NotificationChannel(CH, "Nav link", NotificationManager.IMPORTANCE_LOW)
         )
         registerReceiver(bondRx, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
+        registerReceiver(adapterRx, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+        media = MediaBridge(this, object : MediaBridge.Out {
+            override fun mediaWrite(data: ByteArray, tag: String?) {
+                ble?.writeMedia(data, tag)
+            }
+            override fun mediaMaxWrite() = ble?.maxWrite() ?: 20
+            override fun mediaBoost(ms: Long) {
+                ble?.boost(ms)
+            }
+            override fun mediaLinkReady() = ble?.mediaReady == true
+        })
     }
 
     override fun onDestroy() {
         try {
             unregisterReceiver(bondRx)
+            unregisterReceiver(adapterRx)
         } catch (e: Exception) {
             Log.w(TAG, "$e")
         }
         loc?.stop()
+        media?.stop()
         ble?.disconnect()
         super.onDestroy()
     }
@@ -81,17 +125,23 @@ class NavService : Service() {
             ACTION_STOP -> {
                 Prefs.setServiceEnabled(this, false)
                 loc?.stop()
+                media?.stop()
                 ble?.disconnect()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_UNPAIR -> {
+                // Writes are queued: give UNPAIR time to reach the device
+                // before tearing the link down.
                 ble?.writeCmd(byteArrayOf(BleManager.CMD_UNPAIR))
-                ble?.removeBond()
                 Prefs.clearBond(this)
                 loc?.stop()
-                ble?.disconnect()
+                media?.stop()
+                main.postDelayed({
+                    ble?.removeBond()
+                    ble?.disconnect()
+                }, 800)
                 updateNotif("Unpaired")
                 return START_STICKY
             }
@@ -126,6 +176,15 @@ class NavService : Service() {
                 override fun onStatus(batteryMv: Int, link: Int) {
                     Log.i(TAG, "status link=$link")
                 }
+
+                override fun onMediaReady() {
+                    media?.start()
+                    media?.sendAll()
+                }
+
+                override fun onMediaCmd(cmd: ByteArray) {
+                    media?.handle(cmd)
+                }
             })
         }
         if (loc == null) {
@@ -133,7 +192,9 @@ class NavService : Service() {
                 if (connected) ble?.writePosition(payload)
             }
         }
-        ble?.connect(bond.mac, bond.token)
+        val fresh = intent?.getBooleanExtra(EXTRA_FRESH, false) == true
+        if (fresh) ble?.disconnect()  // drop any attempt using old credentials
+        ble?.connect(bond.mac, bond.token, fresh)
         updateNotif("Connecting…")
         return START_STICKY
     }

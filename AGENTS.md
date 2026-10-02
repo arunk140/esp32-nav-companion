@@ -10,7 +10,8 @@ ESP32-S3 round-display nav device + Android companion app. Monorepo.
 
 ## Layout
 
-- `firmware/` — ESP-IDF 5.5.2, LVGL 9.3, NimBLE. Build: `source ~/.espressif/tools/activate_idf_v5.5.2.sh && cd firmware && idf.py build && idf.py -p /dev/ttyACM0 flash`
+- `firmware_v2/` — **current firmware**, from-scratch rewrite (same BLE contract, tiles, partitions, NVS keys). ESP-IDF 5.5.2, LVGL 9.6, NimBLE. See `firmware_v2/README.md`. Build: `source ~/.espressif/tools/activate_idf_v5.5.2.sh && cd firmware_v2 && idf.py build && idf.py -p /dev/ttyACM0 flash`. Contract header: `firmware_v2/main/ble_service.h`.
+- `firmware/` — v1 (superseded; kept for reference).
 - `app/` — Kotlin, Gradle wrapper 9.3.1 (cached), AGP 8.13.2. Build: `cd app && ./gradlew :app:assembleDebug`. Java 25 only (Java 21 install is a stub).
 - `tools/` — `download_tiles.py` (MapTiler, polite), `make_test_tiles.py`
 - `tmp/` — tile staging, gitignored. Never commit tiles or binaries.
