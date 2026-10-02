@@ -62,6 +62,7 @@ static bool s_was_nav;
 static double s_mx, s_my;   // marker as displayed (animated)
 static bool s_has_dest;     // destination marker (from the phone)
 static double s_dnx, s_dny; // destination, normalized Web-Mercator
+static uint32_t s_line_anim_ms;  // last marching-dots invalidate
 static double s_ax, s_ay, s_bx, s_by;
 static uint32_t s_anim_t0, s_anim_dur;
 static bool s_anim;
@@ -244,35 +245,64 @@ static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
     lv_draw_rect(layer, &r, &dot);
 }
 
-#define DEST_R 9
-#define DEST_PIN_H 16
+#define DEST_R 7
 
-// Destination: a filled pin (disc + downward tail) with a dark ring, in a warm
-// colour so it never reads as the blue live-position marker.
+// Destination: a plain filled orange dot with a dark ring so it reads on any
+// map colour.
 static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
 {
-    lv_color_t c = lv_color_hex(COL_DEST);
-
-    // tail: a triangle from under the disc down to a point
-    lv_draw_triangle_dsc_t t;
-    lv_draw_triangle_dsc_init(&t);
-    t.color = c;
-    t.opa = LV_OPA_COVER;
-    t.p[0].x = x - 6;            t.p[0].y = y + 2;
-    t.p[1].x = x + 6;            t.p[1].y = y + 2;
-    t.p[2].x = x;                t.p[2].y = y + DEST_PIN_H;
-    lv_draw_triangle(layer, &t);
-
     lv_draw_rect_dsc_t r;
     lv_draw_rect_dsc_init(&r);
     r.radius = LV_RADIUS_CIRCLE;
-    r.bg_color = c;
+    r.bg_color = lv_color_hex(COL_DEST);
     r.bg_opa = LV_OPA_COVER;
     r.border_color = lv_color_hex(0x000000);
     r.border_width = 2;
-    r.border_opa = LV_OPA_COVER;
-    lv_area_t disc = {x - DEST_R, y - DEST_R - 4, x + DEST_R, y + DEST_R - 4};
+    r.border_opa = LV_OPA_60;
+    lv_area_t disc = {x - DEST_R, y - DEST_R, x + DEST_R, y + DEST_R};
     lv_draw_rect(layer, &r, &disc);
+}
+
+// Dotted line from the position marker to the destination. `phase` (0..dash)
+// shifts the dash start so the dots march toward the destination.
+#define LINK_DASH 9
+#define LINK_GAP 7
+#define LINK_W 5
+#define LINK_ANIM_MS 100   // ~10 fps for the marching dots
+
+static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
+                           int32_t x1, int32_t y1, int32_t phase)
+{
+    float dx = (float)(x1 - x0), dy = (float)(y1 - y0);
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 4.0f) return;
+    float ux = dx / len, uy = dy / len;
+
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.radius = LINK_W;              // capsule caps
+    d.bg_color = lv_color_hex(COL_DEST);
+    d.bg_opa = LV_OPA_70;
+    d.border_opa = LV_OPA_TRANSP;
+
+    const int period = LINK_DASH + LINK_GAP;
+    int32_t p = phase % period;
+    for (float s = (float)p - period; s < len; s += period) {
+        float a = s < 0 ? 0 : s;
+        float b = s + LINK_DASH;
+        if (a >= len) break;
+        if (b > len) b = len;
+        if (b - a < 1.0f) continue;
+        int32_t ax = (int32_t)lroundf(x0 + ux * a), ay = (int32_t)lroundf(y0 + uy * a);
+        int32_t bx = (int32_t)lroundf(x0 + ux * b), by = (int32_t)lroundf(y0 + uy * b);
+        lv_area_t e = {
+            .x1 = (ax < bx ? ax : bx) - LINK_W / 2,
+            .y1 = (ay < by ? ay : by) - LINK_W / 2,
+            .x2 = (ax < bx ? bx : ax) + LINK_W / 2,
+            .y2 = (ay < by ? by : ay) + LINK_W / 2,
+        };
+        lv_draw_rect(layer, &d, &e);
+    }
 }
 
 typedef struct {
@@ -609,7 +639,19 @@ static void draw_cb(lv_event_t *e)
 {
     lv_layer_t *layer = lv_event_get_layer(e);
     int32_t sx = 0, sy = 0;
-    // Destination first: the live-position marker draws over it if they meet.
+    bool have_sx = false;
+    if (s_has_fix) {
+        marker_screen(s_f_ox, s_f_oy, s_f_rot, &sx, &sy);
+        have_sx = true;
+    }
+    // Suggested route: a marching dotted line from us to the destination,
+    // drawn first so both markers sit on top.
+    if (s_has_dest && have_sx) {
+        int32_t dx, dy;
+        world_screen(s_dnx, s_dny, s_f_ox, s_f_oy, s_f_rot, &dx, &dy);
+        draw_dest_line(layer, sx, sy, dx, dy,
+                       (int32_t)(now_ms() % (LINK_DASH + LINK_GAP)));
+    }
     if (s_has_dest) {
         int32_t dx, dy;
         world_screen(s_dnx, s_dny, s_f_ox, s_f_oy, s_f_rot, &dx, &dy);
@@ -617,11 +659,8 @@ static void draw_cb(lv_event_t *e)
             draw_dest(layer, dx, dy);
         }
     }
-    if (s_has_fix) {
-        marker_screen(s_f_ox, s_f_oy, s_f_rot, &sx, &sy);
-        if (sx > -40 && sx < BOARD_LCD_W + 40 && sy > -40 && sy < BOARD_LCD_H + 40) {
-            draw_marker(layer, sx, sy, s_f_rot);
-        }
+    if (have_sx && sx > -40 && sx < BOARD_LCD_W + 40 && sy > -40 && sy < BOARD_LCD_H + 40) {
+        draw_marker(layer, sx, sy, s_f_rot);
     }
     s_r_rot = lroundf(s_f_rot * 10.0f);
     s_r_ox = s_f_ox;
@@ -1230,6 +1269,12 @@ void map_view_tick(void)
         int32_t ox, oy, sx = 0, sy = 0;
         view_origin(&ox, &oy);
         if (s_has_fix) marker_screen(ox, oy, s_rot, &sx, &sy);
+        // Marching dots on the destination line need a fresh frame ~10/s.
+        bool line_anim = s_has_dest && s_has_fix;
+        if (line_anim && t - s_line_anim_ms >= LINK_ANIM_MS) {
+            s_line_anim_ms = t;
+            lv_obj_invalidate(s_map);
+        }
         if (!s_r_valid || ox != s_r_ox || oy != s_r_oy || sx != s_r_mx || sy != s_r_my ||
             lroundf(s_rot * 10.0f) != s_r_rot) {
             lv_obj_invalidate(s_map);

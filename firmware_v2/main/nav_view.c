@@ -358,10 +358,11 @@ void nav_view_update(const nav_state_t *st, const char *street)
         s_street[o] = '\0';
         if (!o) snprintf(s_street, sizeof(s_street), "unnamed road");
     }
-    if (s_lbl_street) {
-        lv_label_set_text(s_lbl_street, s_street);
-        refresh();
-    }
+    if (s_lbl_street) lv_label_set_text(s_lbl_street, s_street);
+    // Always re-evaluate visibility: a stop STATE carries no street, and
+    // refresh() is what hides the banner (and applies staleness). Calling it
+    // only from the street branch left the banner up forever after a stop.
+    refresh();
 }
 
 bool nav_view_active(void)
