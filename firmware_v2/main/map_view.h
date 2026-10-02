@@ -35,4 +35,8 @@ void map_view_toast(const char *txt);
 // Called from the music button's click event: the callee must defer any
 // screen change (it would delete the button inside its own event).
 void map_view_set_media_cb(void (*cb)(void));
+
+// Triple tap on the status pill -> straight to deep sleep. Runs from
+// map_view_tick, not from the event.
+void map_view_set_sleep_cb(void (*cb)(void));
 void map_view_set_zoom(int z);

@@ -20,6 +20,7 @@
 #include "board.h"
 #include "display.h"
 #include "lcd.h"
+#include "lvgl.h"
 #include "map_view.h"
 #include "media_art.h"
 #include "media_view.h"
@@ -37,6 +38,7 @@ static const char *TAG = "nav";
 
 static void note_activity(void);
 static void enter_deep_sleep(void);
+static void sleep_now(void);
 
 typedef enum { EV_LINK_UP, EV_LINK_DOWN, EV_CMD } ev_type_t;
 
@@ -351,6 +353,9 @@ static void demo_walk(void)
 //   the phone cannot wake it - touch is the only way back.
 static uint32_t s_last_activity;
 static bool s_screen_off;
+static bool s_sleep_pending;
+static uint32_t s_sleep_at;
+#define SLEEP_INDICATOR_MS 800
 
 static void note_activity(void)
 {
@@ -362,7 +367,31 @@ static void note_activity(void)
     }
 }
 
+// Shows "Sleeping..." and commits shortly after: a tap or a phone command
+// that darkens the screen with no feedback reads as a broken device.
 static void enter_deep_sleep(void)
+{
+    if (s_sleep_pending) return;
+    s_sleep_pending = true;
+    s_sleep_at = now_ms() + SLEEP_INDICATOR_MS;
+
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_t *dim = lv_obj_create(scr);
+    lv_obj_remove_style_all(dim);
+    lv_obj_set_size(dim, BOARD_LCD_W, BOARD_LCD_H);
+    lv_obj_center(dim);
+    lv_obj_set_style_bg_color(dim, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(dim, LV_OPA_80, 0);
+    lv_obj_set_clickable(dim, false);
+    lv_obj_t *msg = lv_label_create(dim);
+    lv_label_set_text(msg, "Sleeping...");
+    lv_obj_set_style_text_font(msg, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(msg, lv_color_white(), 0);
+    lv_obj_center(msg);
+    ESP_LOGW(TAG, "sleeping");
+}
+
+static void sleep_now(void)
 {
     // Persist what the GUI task has been deferring, then go dark.
     map_view_flush_state();
@@ -377,6 +406,14 @@ static void enter_deep_sleep(void)
     // follows would strap the chip into the bootloader.
     esp_sleep_enable_ext1_wakeup_io(BIT64(16), ESP_EXT1_WAKEUP_ALL_LOW);
     esp_deep_sleep_start();
+}
+
+static void sleep_tick(void)
+{
+    if (s_sleep_pending && (int32_t)(now_ms() - s_sleep_at) >= 0) {
+        s_sleep_pending = false;
+        sleep_now();
+    }
 }
 
 static void power_tick(void)
@@ -416,6 +453,7 @@ static void gui_task(void *arg)
         process_events();
         poll_boot_button();
         power_tick();
+        sleep_tick();
         map_view_tick();
         media_view_tick();
         if (s_screen_req != SCREEN_NONE) {
@@ -466,6 +504,7 @@ void app_main(void)
     map_view_init_state();
     map_view_set_reset_cb(local_reset);
     map_view_set_media_cb(open_media);
+    map_view_set_sleep_cb(enter_deep_sleep);
     media_view_set_change_cb(media_changed);
     media_art_init();
 

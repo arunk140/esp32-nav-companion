@@ -33,6 +33,9 @@
 #define ROT_RATE 5.0f        // 1/s: rotation eases with a ~200 ms time constant
 #define RESET_HOLD_MS 15000
 #define RESET_HINT_MS 1500
+#define TRIPLE_TAP_N 3
+#define TRIPLE_TAP_WINDOW_MS 1000
+#define TAP_MAX_MS 500
 
 #define COL_PENDING 0xF2EFE9
 #define COL_MISSING 0xD9DCE0
@@ -74,6 +77,10 @@ static uint32_t s_toast_until;
 static int s_status_key = -1;
 static void (*s_reset_cb)(void);
 static void (*s_media_cb)(void);
+static void (*s_sleep_cb)(void);
+static bool s_sleep_req;
+static uint32_t s_last_tap_ms;
+static int s_tap_count;
 static bool s_reset_req;
 static uint32_t s_hold_t0;
 static int s_hold_shown = -1;
@@ -775,7 +782,21 @@ static void pill_event_cb(lv_event_t *e)
             }
         }
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        if (!s_hold_fired && s_hold_shown >= 0) show_toast("Reset cancelled");
+        // A press shorter than TAP_MAX_MS is a tap; anything longer is the
+        // start of the hold, and cancels tap counting.
+        if (s_hold_t0 && t - s_hold_t0 <= TAP_MAX_MS && !s_hold_fired) {
+            if (s_last_tap_ms && t - s_last_tap_ms > TRIPLE_TAP_WINDOW_MS) s_tap_count = 0;
+            s_last_tap_ms = t;
+            if (++s_tap_count >= TRIPLE_TAP_N) {
+                s_tap_count = 0;
+                s_sleep_req = true;
+            } else if (s_tap_count == TRIPLE_TAP_N - 1) {
+                show_toast("Tap again to sleep");
+            }
+        } else {
+            s_tap_count = 0;
+            if (!s_hold_fired && s_hold_shown >= 0) show_toast("Reset cancelled");
+        }
         s_hold_t0 = 0;
         s_hold_shown = -1;
     }
@@ -795,6 +816,11 @@ void map_view_set_reset_cb(void (*cb)(void))
 void map_view_set_media_cb(void (*cb)(void))
 {
     s_media_cb = cb;
+}
+
+void map_view_set_sleep_cb(void (*cb)(void))
+{
+    s_sleep_cb = cb;
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -917,6 +943,7 @@ void map_view_destroy(void)
 {
     s_hold_t0 = 0;
     s_hold_shown = -1;
+    s_tap_count = 0;
     if (s_map) lv_display_remove_event_cb_with_user_data(display_get(), render_start_cb, NULL);
     // Objects are deleted by the caller cleaning the screen.
     s_map = s_pill = s_pill_dot = s_pill_lbl = NULL;
@@ -1053,6 +1080,13 @@ void map_view_tick(void)
 
     if (!s_map) return;
 
+    // Both change the screen (or power off), so they run here rather than
+    // inside the pill's event callback.
+    if (s_sleep_req) {
+        s_sleep_req = false;
+        if (s_sleep_cb) s_sleep_cb();
+        return;
+    }
     if (s_reset_req) {
         s_reset_req = false;
         if (s_reset_cb) s_reset_cb();  // destroys this screen
