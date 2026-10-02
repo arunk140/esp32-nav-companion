@@ -51,7 +51,10 @@ static volatile bool s_bonded_req;      // persist bond flag (GUI task does NVS)
 static volatile bool s_bonded_val;
 static volatile bool s_link_up;
 static volatile bool s_pos_new;
-static int32_t s_pos_lat, s_pos_lon;
+// Written by the NimBLE task, read by the GUI task. Must be volatile: the
+// flag alone is not a barrier for the payload, and a cached read here is a
+// stale or garbled fix, which the map then renders as a huge jump.
+static volatile int32_t s_pos_lat, s_pos_lon;
 static volatile uint32_t s_pos_ms;
 static volatile uint32_t s_pos_age_ms;
 static volatile bool s_got_pos;  // at least one fix stashed
@@ -191,7 +194,13 @@ static void gui_task(void *arg)
     (void)arg;
     static bool stale_shown;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+        // One tick, not pdMS_TO_TICKS(5): CONFIG_FREERTOS_HZ=100 makes a tick
+        // 10 ms, so pdMS_TO_TICKS(5) truncates to ZERO and vTaskDelay(0)
+        // returns immediately -- gui_task spins at ~29 kHz instead of pacing.
+        // At that rate the per-poll cost saturates CPU 1, IDLE1 never runs,
+        // and the task watchdog fires every 5 s. 100 Hz is ample for the
+        // marker ease and the 30 Hz drag apply below.
+        vTaskDelay(1);
         boot_button_poll();
         // Consume BLE stash in LVGL context.
         if (s_pos_new) {

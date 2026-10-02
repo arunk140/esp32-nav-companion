@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.0"
+  espressif/qrcode: "^0.2.0"
+  # NOTE: no lvgl. firmware_v2 hand-rolls rendering and touch input.

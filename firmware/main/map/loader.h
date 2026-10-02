@@ -32,12 +32,21 @@ typedef struct map_tiles_t *loader_map_handle_t;
 // handle: map_tiles fork handle (for map_tiles_load_file). Call once.
 void loader_init(loader_map_handle_t handle);
 
-// Enqueue a read. Drops the request if the queue is full (caller retries
-// next poll; missing tiles just pop in a frame later).
-void loader_enqueue(int slot, int z, int x, int y, uint32_t gen);
+// Enqueue a read.
+//
+// Returns false if the request was DROPPED because the queue is full. This
+// is load-bearing: the caller must only count a slot as "loading" when this
+// returns true, and must retry on false. A void return here let the caller
+// count requests that never existed, so a dropped tile could never complete
+// and the zoom preview would stay stuck at 200% forever.
+bool loader_enqueue(int slot, int z, int x, int y, uint32_t gen);
 
 // Drain one completion. Returns false when the queue is empty.
 bool loader_poll_done(load_done_t *out);
+
+// Number of accepted requests not yet reported. O(1) "is anything loading",
+// so a 100 Hz GUI poll does not need a queue peek every tick.
+int loader_active(void);
 
 // Return a scratch buffer after memcpy.
 void loader_release(uint8_t *scratch);

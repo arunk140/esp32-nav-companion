@@ -1,0 +1,39 @@
+# nav-esp32 firmware_v2 — no LVGL.
+#
+# Everything here is a fresh start except the parts that are contracts or
+# board glue: the BLE UUIDs (mirrored by the Android app), the SD tile
+# format, and the vendor driver tree. Rendering and touch are hand-rolled.
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+# Pin the target. Without this a fresh checkout (sdkconfig.defaults only, no
+# generated sdkconfig) defaults to esp32, which silently drops the S3 LCD
+# capability flags and then fails on esp_lcd_panel_rgb.h.
+CONFIG_IDF_TARGET="esp32s3"
+
+# Octal PSRAM is auto-detected at runtime; the buffers we care about (tile
+# mosaic, framebuffer, loader scratch) all live here.
+CONFIG_SPIRAM=y
+
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
+
+# BLE controller + NimBLE host. Persist bonding keys in NVS, otherwise the
+# bond lives in RAM and every reboot re-triggers pairing on the phone.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# Long filenames: the tile folder (street_map) exceeds 8.3, and without LFN
+# FATFS returns STREET~1 so every tile open fails.
+CONFIG_FATFS_LFN_HEAP=y
+
+# Ship quiet. The USB serial console BLOCKS when no reader is attached, and a
+# blocked console inside a hot path wedges the BLE host task and trips the
+# interrupt WDT. Raise verbosity only for local debugging.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+
+# 100 Hz tick => vTaskDelay(1) is 10 ms. NOTE: pdMS_TO_TICKS(5) is ZERO at
+# this rate; never use it for pacing (see docs/02-v2-notes.md).
+CONFIG_FREERTOS_HZ=100

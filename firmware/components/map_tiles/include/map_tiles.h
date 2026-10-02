@@ -182,9 +182,14 @@ uint8_t *map_tiles_slot_ensure(map_tiles_handle_t handle, int index);
 /**
  * Point a slot's image descriptor at its (filled) buffer and record coords.
  * Call after memcpying a loader scratch buffer in. nav-esp32 fork addition.
+ *
+ * @param zoom Zoom the caller actually loaded. If it no longer matches the
+ *             handle's current zoom the commit is refused and the slot is
+ *             marked stale, so a late completion can never be mistaken for a
+ *             tile of the current zoom.
  */
 void map_tiles_slot_commit(map_tiles_handle_t handle, int index, int tile_x,
-                           int tile_y);
+                           int tile_y, int zoom);
 
 /**
  * @brief Convert GPS coordinates to tile coordinates

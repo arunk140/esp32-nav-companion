@@ -678,10 +678,25 @@ uint8_t *map_tiles_slot_ensure(map_tiles_handle_t handle, int index)
 }
 
 void map_tiles_slot_commit(map_tiles_handle_t handle, int index, int tile_x,
-                           int tile_y)
+                           int tile_y, int zoom)
 {
     if (!handle || !handle->initialized || index < 0 ||
         index >= handle->tile_count || !handle->tile_bufs[index]) {
+        return;
+    }
+
+    // A completion for a different zoom than the one now configured holds
+    // pixels from the wrong tile set. The caller already drops stale
+    // generations, but record the zoom the caller actually loaded and refuse
+    // anything that no longer matches: otherwise loaded_z is set to
+    // handle->zoom and the slot claims to hold this tile at the current
+    // zoom when it holds the previous zoom's image.
+    if (zoom != handle->zoom) {
+        ESP_LOGD(TAG, "slot %d: drop z%d (now z%d)", index, zoom,
+                 handle->zoom);
+        handle->loaded_tx[index] = INT32_MIN;
+        handle->loaded_ty[index] = INT32_MIN;
+        handle->loaded_z[index] = INT32_MIN;
         return;
     }
 

@@ -16,6 +16,16 @@ static QueueHandle_t s_done_q;
 static QueueHandle_t s_free_q;
 static loader_map_handle_t s_map;
 
+// Requests accepted but not yet reported. The GUI task polls at 100 Hz and
+// wants an O(1) "is anything in flight" test, so a queue peek per poll is
+// wasteful; this is a plain counter maintained across the round trip.
+static volatile int s_active;
+
+int loader_active(void)
+{
+    return s_active;
+}
+
 static void loader_task(void *arg)
 {
     (void)arg;
@@ -36,8 +46,9 @@ static void loader_task(void *arg)
             done.scratch = NULL;
         }
         // Done queue is sized for worst case; drop (don't block) if full —
-        // the tile just pops in on a later re-request.
+        // the caller's stall detector re-arms the slot.
         xQueueSend(s_done_q, &done, 0);
+        s_active--;
     }
 }
 
@@ -60,11 +71,13 @@ void loader_init(loader_map_handle_t handle)
     xTaskCreatePinnedToCore(loader_task, "tile_ld", 4096, NULL, 2, NULL, 0);
 }
 
-void loader_enqueue(int slot, int z, int x, int y, uint32_t gen)
+bool loader_enqueue(int slot, int z, int x, int y, uint32_t gen)
 {
-    if (!s_req_q) return;
+    if (!s_req_q) return false;
     load_req_t req = {.slot = slot, .z = z, .x = x, .y = y, .gen = gen};
-    xQueueSend(s_req_q, &req, 0);
+    if (xQueueSend(s_req_q, &req, 0) != pdTRUE) return false;
+    s_active++;
+    return true;
 }
 
 bool loader_poll_done(load_done_t *out)
