@@ -23,6 +23,9 @@ void settings_set_paired(bool paired);
 uint8_t settings_brightness(void);
 void settings_set_brightness(uint8_t pct);
 
+bool settings_dark_map(void);
+void settings_set_dark_map(bool dark);
+
 uint8_t settings_zoom(void);  // 0 = unset
 void settings_set_zoom(uint8_t z);
 

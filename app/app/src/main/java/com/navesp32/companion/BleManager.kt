@@ -29,7 +29,7 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
     interface Cb {
         fun onConnState(connected: Boolean)
         fun onBonded()
-        fun onStatus(batteryMv: Int, link: Int)
+        fun onStatus(batteryMv: Int, link: Int, darkMap: Boolean)
         fun onMediaReady() {}
         fun onMediaCmd(cmd: ByteArray) {}
     }
@@ -50,6 +50,7 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         const val CMD_SET_BRIGHTNESS: Byte = 0x05
         const val CMD_PAIR: Byte = 0x06
         const val CMD_SLEEP: Byte = 0x07
+        const val CMD_SET_THEME: Byte = 0x08
 
         // Firmware ATT MTU is 256 and its write buffer 256 B: never exceed.
         const val MAX_WRITE = 253
@@ -263,7 +264,9 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
                     ch.uuid == UUID.fromString(STATUS_UUID) && value.size >= 3
                 ) {
                     val mv = (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
-                    cb.onStatus(mv, value[2].toInt())
+                    // Byte 4 is the map theme (older firmware sends only 4).
+                    val dark = value.size >= 5 && value[4].toInt() != 0
+                    cb.onStatus(mv, value[2].toInt(), dark)
                 }
                 opDone()
             }
@@ -425,6 +428,9 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
     // Device goes to deep sleep. Touch is the only way back, so the link
     // drops and the service reconnects after the next touch.
     fun cmdSleep() = writeCmd(byteArrayOf(CMD_SLEEP))
+
+    fun cmdSetTheme(dark: Boolean) =
+        writeCmd(byteArrayOf(CMD_SET_THEME, if (dark) 1 else 0))
 
     fun cmdSetBrightness(pct: Int) =
         writeCmd(byteArrayOf(CMD_SET_BRIGHTNESS, pct.coerceIn(0, 100).toByte()))

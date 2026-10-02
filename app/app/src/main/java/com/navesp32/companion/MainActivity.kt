@@ -29,6 +29,10 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var brightJob: Runnable? = null
 
+    // Set while refresh() writes the switch, so its listener does not fire a
+    // command straight back at the device.
+    private var updating = false
+
     private val stateRx = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) = refresh()
     }
@@ -72,6 +76,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
+        }
+        b.darkMapToggle.setOnCheckedChangeListener { _, on ->
+            if (updating) return@setOnCheckedChangeListener
+            Prefs.setDarkMap(this, on)
+            startService(Intent(this, NavService::class.java)
+                .setAction(NavService.ACTION_THEME)
+                .putExtra(NavService.EXTRA_DARK_MAP, on))
         }
         b.btnSleep.setOnClickListener {
             if (Prefs.loadBond(this) == null) {
@@ -133,6 +144,9 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         val bond = Prefs.loadBond(this)
         val st = NavService.linkState
+        updating = true
+        b.darkMapToggle.isChecked = Prefs.darkMap(this)
+        updating = false
         b.status.text = if (bond == null) {
             "Not paired — tap Scan QR"
         } else {

@@ -42,6 +42,12 @@ object Prefs {
         prefs(ctx).edit().putBoolean("service_on", on).apply()
     }
 
+    fun darkMap(ctx: Context): Boolean = prefs(ctx).getBoolean("darkmap", true)
+
+    fun setDarkMap(ctx: Context, dark: Boolean) {
+        prefs(ctx).edit().putBoolean("darkmap", dark).apply()
+    }
+
     fun brightness(ctx: Context): Int = prefs(ctx).getInt("brightness", 80)
 
     fun setBrightness(ctx: Context, v: Int) {

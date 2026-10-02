@@ -22,6 +22,7 @@ static uint8_t s_own_addr_type;
 static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile uint8_t s_fps;
 static uint16_t s_status_h;
+static volatile uint8_t s_theme;
 static struct ble_npl_event s_forget_ev, s_disc_ev, s_mcmd_ev;
 static uint16_t s_media_cmd_h;
 static volatile bool s_media_sub;
@@ -81,7 +82,7 @@ static int chr_status(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
     (void)attr;
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
-    uint8_t s[4] = {0, 0, s_conn != BLE_HS_CONN_HANDLE_NONE ? 1 : 0, s_fps};
+    uint8_t s[5] = {0, 0, s_conn != BLE_HS_CONN_HANDLE_NONE ? 1 : 0, s_fps, s_theme ? 1 : 0};
     return os_mbuf_append(ctxt->om, s, sizeof(s)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
@@ -463,6 +464,11 @@ void nav_ble_start(const nav_ble_cbs_t *cbs, const char *device_name)
 bool nav_ble_connected(void)
 {
     return s_conn != BLE_HS_CONN_HANDLE_NONE;
+}
+
+void nav_ble_set_theme(uint8_t dark)
+{
+    s_theme = dark;
 }
 
 void nav_ble_set_fps(uint8_t fps)

@@ -813,6 +813,11 @@ static void pill_event_cb(lv_event_t *e)
     }
 }
 
+void map_view_invalidate(void)
+{
+    invalidate();
+}
+
 void map_view_toast(const char *txt)
 {
     if (!s_toast) return;  // not on the map screen

@@ -32,6 +32,9 @@ void map_view_set_reset_cb(void (*cb)(void));
 // Shows a short message over the map. No-op on other screens.
 void map_view_toast(const char *txt);
 
+// Repaints after a tile-theme change (placeholder colours follow it).
+void map_view_invalidate(void);
+
 // Called from the music button's click event: the callee must defer any
 // screen change (it would delete the button inside its own event).
 void map_view_set_media_cb(void (*cb)(void));

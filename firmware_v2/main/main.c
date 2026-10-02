@@ -201,6 +201,17 @@ static void local_reset(void)
     unpair(false);
 }
 
+// Theme change: cached tiles are dropped by tiles_set_dark() and re-read, so
+// the repaint below is only for the placeholder colours.
+static void set_theme(bool dark)
+{
+    tiles_set_dark(dark);
+    settings_set_dark_map(dark);
+    nav_ble_set_theme(dark);
+    map_view_invalidate();
+    ESP_LOGW(TAG, "%s map", dark ? "dark" : "light");
+}
+
 static bool valid_fix(const nav_position_t *p)
 {
     if (p->lat_e7 == 0 && p->lon_e7 == 0) return false;  // "no fix yet"
@@ -231,6 +242,9 @@ static void handle_cmd(const app_ev_t *ev)
             s_brightness_dirty = true;
             s_brightness_changed_ms = now_ms();
         }
+        break;
+    case NAV_CMD_SET_THEME:
+        if (ev->len >= 1) set_theme(ev->args[0] != 0);
         break;
     case NAV_CMD_SLEEP:
         enter_deep_sleep();
@@ -500,6 +514,8 @@ void app_main(void)
     board_boot_button_init();
 
     tiles_init();
+    // Stored preference wins over the build-time default.
+    set_theme(settings_dark_map());
     display_init();
     map_view_init_state();
     map_view_set_reset_cb(local_reset);

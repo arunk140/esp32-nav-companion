@@ -28,6 +28,9 @@ class NavService : Service() {
         const val ACTION_UNPAIR = "com.navesp32.companion.UNPAIR"
         const val ACTION_BRIGHTNESS = "com.navesp32.companion.BRIGHTNESS"
         const val ACTION_SLEEP = "com.navesp32.companion.SLEEP"
+        const val ACTION_THEME = "com.navesp32.companion.THEME"
+        const val ACTION_THEME_STATE = "com.navesp32.companion.THEME_STATE"
+        const val EXTRA_DARK_MAP = "darkMap"
         const val EXTRA_BRIGHTNESS = "brightness"
         const val EXTRA_FRESH = "fresh"
         private const val CH = "nav"
@@ -188,6 +191,12 @@ class NavService : Service() {
                 loc?.stop()
                 return START_STICKY
             }
+            ACTION_THEME -> {
+                val dark = intent.getBooleanExtra(EXTRA_DARK_MAP, false)
+                Prefs.setDarkMap(this, dark)
+                ble?.cmdSetTheme(dark)
+                return START_STICKY
+            }
             ACTION_BRIGHTNESS -> {
                 val v = intent.getIntExtra(EXTRA_BRIGHTNESS, -1)
                 if (v >= 0) {
@@ -218,8 +227,14 @@ class NavService : Service() {
                     updateNotif("Paired")
                 }
 
-                override fun onStatus(batteryMv: Int, link: Int) {
-                    Log.i(TAG, "status link=$link")
+                override fun onStatus(batteryMv: Int, link: Int, darkMap: Boolean) {
+                    Log.i(TAG, "status link=$link darkMap=$darkMap")
+                    // The device is the truth: show what it is actually using.
+                    if (Prefs.darkMap(this@NavService) != darkMap) {
+                        Prefs.setDarkMap(this@NavService, darkMap)
+                        sendBroadcast(Intent(ACTION_THEME_STATE)
+                            .setPackage(packageName).putExtra(EXTRA_DARK_MAP, darkMap))
+                    }
                 }
 
                 override fun onMediaReady() {
@@ -240,6 +255,7 @@ class NavService : Service() {
         val fresh = intent?.getBooleanExtra(EXTRA_FRESH, false) == true
         if (fresh) ble?.disconnect()  // drop any attempt using old credentials
         ble?.connect(bond.mac, bond.token, fresh)
+        ble?.cmdSetTheme(Prefs.darkMap(this))
         setState(CONNECTING)
         return START_STICKY
     }

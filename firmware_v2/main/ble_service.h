@@ -66,13 +66,15 @@
 #define NAV_CMD_SET_BRIGHTNESS 0x05  // u8 0-100 (5 % floor applied on device)
 #define NAV_CMD_PAIR 0x06            // 6 ASCII digits = QR token
 #define NAV_CMD_SLEEP 0x07           // deep sleep now; touch is the only way back
+#define NAV_CMD_SET_THEME 0x08       // u8: 0 = light map, 1 = dark map
 
 // POSITION (write / write-no-rsp), 18 bytes little-endian:
 //   i32 lat 1e-7 deg, i32 lon 1e-7 deg, u16 speed cm/s, u16 cog 0.01 deg,
 //   u8 sats, u8 fix, u32 phone timestamp ms
 #define NAV_POSITION_LEN 18
 
-// STATUS (read/notify): u16 battery mV (0 = USB), u8 link, u8 fps
+// STATUS (read/notify): u16 battery mV (0 = USB), u8 link, u8 fps,
+// u8 theme (0 light, 1 dark)
 
 typedef struct {
     int32_t lat_e7;
@@ -108,6 +110,7 @@ typedef struct {
 void nav_ble_start(const nav_ble_cbs_t *cbs, const char *device_name);
 bool nav_ble_connected(void);
 void nav_ble_set_fps(uint8_t fps);
+void nav_ble_set_theme(uint8_t dark);  // reported back in STATUS
 
 // Sends a MEDIA_CMD notification (any task; no-op unless the phone has
 // subscribed).

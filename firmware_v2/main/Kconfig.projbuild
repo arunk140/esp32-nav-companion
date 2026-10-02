@@ -32,12 +32,11 @@ config NAV_DEEP_SLEEP_MS
     default 600000
 
 config NAV_DARK_MAP
-    bool "Preview: hue-preserving dark map (no trigger yet, build-time only)"
-    default n
+    bool "Dark map on first boot (the app can change it later)"
+    default y
     help
-        Inverts map tile colours as they are loaded from the SD card.
-        Build-time only for now; a BLE/app switch will drive this at
-        runtime.
+        Initial map theme, used until the app sets one (CMD 0x08) or a
+        stored preference exists. Tiles are inverted as they are loaded.
 
 config NAV_TILE_CACHE_SLOTS
     int "Tile cache slots (128 KiB PSRAM each)"

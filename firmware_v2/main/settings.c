@@ -15,12 +15,14 @@
 #define KEY_LAST_LON "last_lon"
 #define KEY_HAS_POS "has_pos"
 #define KEY_ZOOM "zoom"
+#define KEY_DARKMAP "darkmap"
 
 static char s_name[16];
 static char s_token[8];
 static bool s_paired;
 static uint8_t s_brightness = NAV_BRIGHTNESS_DEFAULT;
 static uint8_t s_zoom;
+static bool s_dark_map;
 static bool s_has_pos;
 static int32_t s_lat, s_lon;
 
@@ -56,6 +58,7 @@ esp_err_t settings_init(void)
     if (nvs_get_u8(h, KEY_PAIRED, &v) == ESP_OK) s_paired = v != 0;
     if (nvs_get_u8(h, KEY_BRIGHTNESS, &v) == ESP_OK && v <= 100) s_brightness = v;
     if (nvs_get_u8(h, KEY_ZOOM, &v) == ESP_OK) s_zoom = v;
+    if (nvs_get_u8(h, KEY_DARKMAP, &v) == ESP_OK) s_dark_map = v != 0;
     if (nvs_get_u8(h, KEY_HAS_POS, &v) == ESP_OK && v) {
         s_has_pos = nvs_get_i32(h, KEY_LAST_LAT, &s_lat) == ESP_OK &&
                     nvs_get_i32(h, KEY_LAST_LON, &s_lon) == ESP_OK;
@@ -122,6 +125,18 @@ void settings_set_brightness(uint8_t pct)
     if (pct == s_brightness) return;
     s_brightness = pct;
     put_u8(KEY_BRIGHTNESS, pct);
+}
+
+bool settings_dark_map(void)
+{
+    return s_dark_map;
+}
+
+void settings_set_dark_map(bool dark)
+{
+    if (dark == s_dark_map) return;
+    s_dark_map = dark;
+    put_u8(KEY_DARKMAP, dark ? 1 : 0);
 }
 
 uint8_t settings_zoom(void)
