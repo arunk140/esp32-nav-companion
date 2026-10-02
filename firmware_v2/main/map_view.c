@@ -63,6 +63,7 @@ static double s_mx, s_my;   // marker as displayed (animated)
 static bool s_has_dest;     // destination marker (from the phone)
 static double s_dnx, s_dny; // destination, normalized Web-Mercator
 static uint32_t s_line_anim_ms;  // last marching-dots invalidate
+static int s_line_phase;         // dot-pattern offset, advanced per frame
 static double s_ax, s_ay, s_bx, s_by;
 static uint32_t s_anim_t0, s_anim_dur;
 static bool s_anim;
@@ -263,14 +264,16 @@ static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
     lv_draw_rect(layer, &r, &disc);
 }
 
-// Dotted line from the position marker to the destination. `phase` (0..period)
-// shifts the dash start so the dots march toward the destination. The phase
-// advances at now_ms()/LINK_PHASE_DIV, so a bigger divisor marches more slowly.
+// Dotted line from the position marker to the destination. `phase` shifts the
+// dash start so the dots march toward the destination.
+//   LINK_STEP    px the pattern advances per rendered frame (uniform, so motion
+//                is smooth regardless of when a frame happens to draw)
+//   LINK_ANIM_MS how often we ask for a frame; period/step frames = one cycle
 #define LINK_DASH 9
 #define LINK_GAP 7
 #define LINK_W 5
-#define LINK_PHASE_DIV 6   // dots advance 1 px per 6 ms
-#define LINK_ANIM_MS 120   // ~8 fps is plenty for this
+#define LINK_STEP 1
+#define LINK_ANIM_MS 220   // ~4.5 fps: calm march, one cycle in ~3.5 s
 
 static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
                            int32_t x1, int32_t y1, int32_t phase)
@@ -647,12 +650,15 @@ static void draw_cb(lv_event_t *e)
         have_sx = true;
     }
     // Suggested route: a marching dotted line from us to the destination,
-    // drawn first so both markers sit on top.
+    // drawn first so both markers sit on top. The phase advances one step per
+    // rendered frame (not wall-clock): tying it to now_ms() made the pattern
+    // jitter, because draw timing is independent of the tick that invalidates.
     if (s_has_dest && have_sx) {
         int32_t dx, dy;
         world_screen(s_dnx, s_dny, s_f_ox, s_f_oy, s_f_rot, &dx, &dy);
-        draw_dest_line(layer, sx, sy, dx, dy,
-                       (int32_t)((now_ms() / LINK_PHASE_DIV) % (LINK_DASH + LINK_GAP)));
+        s_line_phase += LINK_STEP;
+        if (s_line_phase >= LINK_DASH + LINK_GAP) s_line_phase -= LINK_DASH + LINK_GAP;
+        draw_dest_line(layer, sx, sy, dx, dy, s_line_phase);
     }
     if (s_has_dest) {
         int32_t dx, dy;
@@ -1155,6 +1161,7 @@ void map_view_set_dest(bool valid, int32_t lat_e7, int32_t lon_e7)
     s_dnx = nx;
     s_dny = ny;
     s_has_dest = true;
+    s_line_phase = 0;   // start the march at the pattern origin
     invalidate();
 }
 
