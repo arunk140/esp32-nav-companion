@@ -10,7 +10,6 @@ import android.os.Parcelable
 import android.util.Log
 import net.osmand.aidlapi.IOsmAndAidlCallback
 import net.osmand.aidlapi.IOsmAndAidlInterface
-import net.osmand.aidlapi.OsmandAidlConstants
 import net.osmand.aidlapi.info.AppInfoParams
 import net.osmand.aidlapi.navigation.ADirectionInfo
 import net.osmand.aidlapi.navigation.ANavigationUpdateParams
@@ -76,20 +75,23 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
         const val NAV_OFF_ROUTE = 12
         const val NAV_ARRIVE = 13
 
-        private fun mapType(v: Int): Int = when (v) {
-            OsmandAidlConstants.TURN_TYPE_C -> NAV_CONTINUE
-            OsmandAidlConstants.TURN_TYPE_TSLL -> NAV_SLIGHT_LEFT
-            OsmandAidlConstants.TURN_TYPE_TL -> NAV_LEFT
-            OsmandAidlConstants.TURN_TYPE_TSHL -> NAV_SHARP_LEFT
-            OsmandAidlConstants.TURN_TYPE_TSLR -> NAV_SLIGHT_RIGHT
-            OsmandAidlConstants.TURN_TYPE_TR -> NAV_RIGHT
-            OsmandAidlConstants.TURN_TYPE_TSHR -> NAV_SHARP_RIGHT
-            OsmandAidlConstants.TURN_TYPE_KL -> NAV_KEEP_LEFT
-            OsmandAidlConstants.TURN_TYPE_KR -> NAV_KEEP_RIGHT
-            OsmandAidlConstants.TURN_TYPE_TU, OsmandAidlConstants.TURN_TYPE_TRU -> NAV_UTURN
-            OsmandAidlConstants.TURN_TYPE_RNDB, OsmandAidlConstants.TURN_TYPE_RNLB -> NAV_ROUNDABOUT
-            OsmandAidlConstants.TURN_TYPE_OFFR -> NAV_OFF_ROUTE
-            else -> NAV_NONE
+        // OsmAnd hands back TurnType.toXmlString() here, e.g. "C", "TL", "TSLL",
+        // "RNDB3" (roundabout, exit 3), "OFFR" - NOT an int. Reading it as an
+        // int silently mapped every maneuver to CONTINUE.
+        private fun mapType(v: String?): Int = when (v?.trim()?.uppercase()) {
+            null, "", "C" -> NAV_CONTINUE
+            "TSLL" -> NAV_SLIGHT_LEFT
+            "TL" -> NAV_LEFT
+            "TSHL" -> NAV_SHARP_LEFT
+            "TSLR" -> NAV_SLIGHT_RIGHT
+            "TR" -> NAV_RIGHT
+            "TSHR" -> NAV_SHARP_RIGHT
+            "KL" -> NAV_KEEP_LEFT
+            "KR" -> NAV_KEEP_RIGHT
+            "TU", "TRU" -> NAV_UTURN
+            "OFFR" -> NAV_OFF_ROUTE
+            else -> if (v!!.trim().startsWith("RNDB") || v.startsWith("RNLB")) NAV_ROUNDABOUT
+                    else NAV_NONE
         }
     }
 
@@ -264,9 +266,17 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
             val text = try {
                 val info = api?.appInfo
                 if (info == null) "appInfo() == null (consent not granted yet?)"
-                else "turnInfo=" + (info.turnInfo?.keySet()?.joinToString().orEmpty()) +
-                    "\nleft=${info.leftDistance}m ${info.leftTime}s\n" +
-                    "bound=${info.lastKnownLocation != null}"
+                else {
+                    val t = info.turnInfo
+                    // Show the raw xml string too - it is what decides the icon.
+                    "turn keys=" + (t?.keySet()?.joinToString().orEmpty()) +
+                        "\nnext_turn_type=" + bStr(t, "next_turn_type") +
+                        " dist=" + bInt(t, "next_turn_distance", -1) +
+                        "\nname=" + bStr(t, "next_turn_name") +
+                        "\nmapType=" + mapType(bStr(t, "next_turn_type")) +
+                        "\nleft=${info.leftDistance}m ${info.leftTime}s\n" +
+                        "bound=${info.lastKnownLocation != null}"
+                }
             } catch (e: Exception) {
                 "error: $e"
             }
@@ -340,8 +350,12 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
             return
         }
         val t = info.turnInfo
-        if (t == null) {
-            // Debounced: OsmAnd blanks the next-turn data briefly at each turn.
+        // turnInfo is null only when no route is calculated. When navigation is
+        // stopped mid-route the bundle can still exist but carry no next_turn_*
+        // keys, so "active" hinges on the maneuver key, never on the bundle.
+        val turn = if (t != null) bStr(t, "next_turn_type") else ""
+        if (turn.isEmpty()) {
+            // Debounced: OsmAnd blips the next-turn data at each turn.
             val now = android.os.SystemClock.elapsedRealtime()
             if (lastActive && now - lastSeenActiveMs < NONE_DEBOUNCE_MS) return
             if (lastActive) {
@@ -354,10 +368,10 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
         lastSeenActiveMs = android.os.SystemClock.elapsedRealtime()
         val s = NavState(
             active = true,
-            maneuver = mapType(bInt(t, "next_turn_type", OsmandAidlConstants.TURN_TYPE_C)),
+            maneuver = mapType(turn),
             distanceM = bInt(t, "next_turn_distance", 0),
             street = bStr(t, "next_turn_name"),
-            afterManeuver = mapType(bInt(t, "after_nextturn_type", OsmandAidlConstants.TURN_TYPE_C)),
+            afterManeuver = mapType(bStr(t, "after_nextturn_type")),
             afterDistanceM = bInt(t, "after_nextturn_distance", 0),
             afterStreet = bStr(t, "after_nextturn_name"),
             remainingM = info.leftDistance,
