@@ -104,6 +104,19 @@ BLE extension (existing UUIDs unchanged, mirrored in `BleManager.kt` / `MediaBri
 - **App requirement:** Notification access, needed by Android to read other apps' media sessions. The *Enable media controls* button opens the setting.
 - **Art sources:** metadata bitmap, `content://` URIs, or `https://` URLs. Media3-based players publish the URL first and the bitmap later; each new source is tried until one works.
 
+## Power management
+
+Sleep is decided by the phone link, not by a timer alone:
+
+- **Connected → never sleeps.** A live link means the device is in use. Screen-off and deep sleep both wait for the link to drop; the timers restart from that moment.
+- **Stage 1 — screen off** after `NAV_SCREEN_OFF_MS` (60 s) without touch, phone or movement: backlight to zero, everything else running. The radio stays up, so the phone reconnecting turns the screen back on by itself.
+- **Stage 2 — deep sleep** after `NAV_DEEP_SLEEP_MS` (10 min) more, which powers the radio off, so **the phone cannot wake it**. Deferred position/zoom are flushed to NVS first, the panel is put into reset, and the pending touch frame is drained so INT is high.
+- **Wake: touch only.** GPIO16 (touch INT) is an RTC pin, so it wakes deep sleep. BOOT (GPIO0) is also an RTC pin and *must not* be used: the wake resets the chip, and a button still held across that reset is exactly what straps an ESP32-S3 into the bootloader. The two free header pins (GPIO43/44) are not RTC pins and cannot wake from deep sleep at all. If the touch controller ever fails, recovery is a power cycle.
+- Light sleep is deliberately not used: the RGB panel interrupts roughly every millisecond to refill its bounce buffer, so the CPU would never be idle long enough to save anything.
+- `CMD 0x07` puts the device straight into stage 2; the app's *Sleep device* button sends it. The app shows *Asleep - touch the device to wake it* and keeps retrying the link (5 s → 60 s), so it reconnects by itself once the board wakes.
+
+Current draw is **not measured yet**: there is no battery, so the on-board sense line (GPIO4) floats. An inline USB power meter is the way to confirm the three states (active, screen off, deep sleep), including the SD card's own idle draw.
+
 ## Measured on hardware (2026-10-02)
 
 - Continuous scrolling: **33 fps** sustained for 60 s while streaming 185 tiles (draw 28 ms, vsync wait 0 ms). Heap flat.
@@ -112,4 +125,5 @@ BLE extension (existing UUIDs unchanged, mirrored in `BleManager.kt` / `MediaBri
 - Bond lifecycle (PC as the phone): fresh pair, reconnect, reboot + reconnect, app unpair, re-pair, phone-forgot-bond re-pair: all pass.
 - Real phone (Nothing Phone 3, Android 17): QR scan → clean pair (stale bond auto-removed) → Live; board reboot → automatic encrypted reconnect, no prompt.
 - Media (Nothing Phone 3, ViMusic): art 5–23 KB per track, decoded in 41–82 ms off the GUI task; play/pause, next/prev, volume arc/buttons and progress all confirmed working.
+- Sleep: screen off → deep sleep → wake by touch → auto-reconnect, both from the idle timers and from the app's Sleep button.
 - Shipping build is silent on the console (WARN level).

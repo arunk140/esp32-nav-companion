@@ -27,7 +27,8 @@ ESP32-S3 round-display nav device + Android companion app. Monorepo.
 7. **SD card requirements:** FAT32 + MBR partition table (GPT fails mount with FR_NO_FILESYSTEM=13), LFN enabled (`CONFIG_FATFS_LFN_HEAP=y`, else `street_map` reads as `STREET~1`), `format_if_mount_failed=false` (never auto-format user data). 1-bit bus @ 40 MHz.
 8. **BLE contract is mirrored:** `firmware_v2/main/ble_service.h` ↔ `app/.../BleManager.kt` (media: `MediaBridge.kt`). UUIDs are fixed — generated once, byte order is reverse-string (see `ble_uuid_to_str`). Change both sides together.
 9. **Touch: single reader only.** `esp_lcd_touch get_coordinates` invalidates the sample — a second reader starves LVGL (press/release strobing, frozen drags). LVGL indev reads; everyone else uses `touch_last_sample()`.
-10. **LVGL 9, never 8.** Vendor demo is LVGL 8; we wrote a fresh port (`display/lvgl9_port.c`). `lv_display_set_buffers` (not `set_draw_buffers`).
+10. **Deep-sleep wake = touch (GPIO16) only.** BOOT (GPIO0) must never be a wake source: the wake resets the chip, and a held button straps an ESP32-S3 into the bootloader. GPIO43/44 are not RTC pins and cannot wake from deep sleep. Deep sleep also means the radio is off, so the phone cannot wake the device — only touch can.
+11. **LVGL 9, never 8.** Vendor demo is LVGL 8; we wrote a fresh port (`display/lvgl9_port.c`). `lv_display_set_buffers` (not `set_draw_buffers`).
 
 ## Debugging
 

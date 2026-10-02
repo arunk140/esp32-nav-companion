@@ -65,6 +65,7 @@
 #define NAV_CMD_UNPAIR 0x04
 #define NAV_CMD_SET_BRIGHTNESS 0x05  // u8 0-100 (5 % floor applied on device)
 #define NAV_CMD_PAIR 0x06            // 6 ASCII digits = QR token
+#define NAV_CMD_SLEEP 0x07           // deep sleep now; touch is the only way back
 
 // POSITION (write / write-no-rsp), 18 bytes little-endian:
 //   i32 lat 1e-7 deg, i32 lon 1e-7 deg, u16 speed cm/s, u16 cog 0.01 deg,

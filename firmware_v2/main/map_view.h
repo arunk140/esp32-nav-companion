@@ -19,6 +19,10 @@ void map_view_tick(void);
 void map_view_set_fix(int32_t lat_e7, int32_t lon_e7, uint16_t speed_cms, uint16_t cog_cdeg);
 void map_view_set_link(bool connected, bool paired);
 float map_view_rotation(void);  // deg, 0 = north-up
+
+// Writes any deferred position/zoom to NVS now (before deep sleep).
+void map_view_flush_state(void);
+bool map_view_is_moving(void);
 void map_view_recenter(void);
 
 // Called (from map_view_tick, never inside an LVGL event) when the status

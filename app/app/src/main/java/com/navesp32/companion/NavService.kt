@@ -27,11 +27,34 @@ class NavService : Service() {
         const val ACTION_STOP = "com.navesp32.companion.STOP"
         const val ACTION_UNPAIR = "com.navesp32.companion.UNPAIR"
         const val ACTION_BRIGHTNESS = "com.navesp32.companion.BRIGHTNESS"
+        const val ACTION_SLEEP = "com.navesp32.companion.SLEEP"
         const val EXTRA_BRIGHTNESS = "brightness"
         const val EXTRA_FRESH = "fresh"
         private const val CH = "nav"
         private const val NOTIF_ID = 41
         private const val TAG = "NavService"
+
+        const val ACTION_STATE = "com.navesp32.companion.STATE"
+        const val EXTRA_STATE = "state"
+
+        // Live link state, readable by the UI even when the service is not
+        // running. Broadcast as ACTION_STATE as well, so a resumed screen
+        // picks up changes.
+        const val OFFLINE = "offline"
+        const val CONNECTING = "connecting"
+        const val CONNECTED = "connected"
+        const val ASLEEP = "asleep"
+
+        @Volatile
+        var linkState: String = OFFLINE
+            private set
+
+        fun stateLabel(st: String): String = when (st) {
+            CONNECTED -> "Connected"
+            CONNECTING -> "Connecting..."
+            ASLEEP -> "Asleep - touch the device to wake it"
+            else -> "Searching for the device..."
+        }
 
         fun start(ctx: Context, fresh: Boolean = false) {
             ctx.startForegroundService(
@@ -78,7 +101,7 @@ class NavService : Service() {
                     Log.i(TAG, "bluetooth on: reconnecting")
                     ble?.disconnect()
                     main.postDelayed({ ble?.connect(bond.mac, bond.token) }, 1000)
-                    updateNotif("Connecting…")
+                    setState(CONNECTING)
                 }
             }
         }
@@ -124,9 +147,11 @@ class NavService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 Prefs.setServiceEnabled(this, false)
+                asleep = false
                 loc?.stop()
                 media?.stop()
                 ble?.disconnect()
+                setState(OFFLINE)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -142,7 +167,25 @@ class NavService : Service() {
                     ble?.removeBond()
                     ble?.disconnect()
                 }, 800)
-                updateNotif("Unpaired")
+                asleep = false
+                setState(OFFLINE)
+                return START_STICKY
+            }
+            ACTION_SLEEP -> {
+                if (!connected) {
+                    setState(linkState)
+                    return START_STICKY
+                }
+                // The device is about to power off: say so instead of letting
+                // the dropped link look like a connection problem. Do NOT
+                // disconnect here - that would cancel this very write and the
+                // reconnect backoff. The link drops on its own when the board
+                // sleeps, and BleManager keeps retrying (5 s -> 60 s) so the
+                // board is picked up again as soon as it wakes on touch.
+                asleep = true
+                setState(ASLEEP)
+                ble?.writeCmd(byteArrayOf(BleManager.CMD_SLEEP))
+                loc?.stop()
                 return START_STICKY
             }
             ACTION_BRIGHTNESS -> {
@@ -158,14 +201,16 @@ class NavService : Service() {
         Prefs.setServiceEnabled(this, true)
         val bond = Prefs.loadBond(this)
         if (bond == null) {
-            updateNotif("Not paired — scan QR")
+            asleep = false
+            setState(OFFLINE)
             return START_STICKY
         }
         if (ble == null) {
             ble = BleManager(this, object : BleManager.Cb {
                 override fun onConnState(c: Boolean) {
                     connected = c
-                    updateNotif(if (c) "Connected to ${bond.name}" else "Connecting…")
+                    if (c) asleep = false
+                    setState(if (c) CONNECTED else if (asleep) ASLEEP else CONNECTING)
                     if (c) loc?.start() else loc?.stop()
                 }
 
@@ -195,7 +240,7 @@ class NavService : Service() {
         val fresh = intent?.getBooleanExtra(EXTRA_FRESH, false) == true
         if (fresh) ble?.disconnect()  // drop any attempt using old credentials
         ble?.connect(bond.mac, bond.token, fresh)
-        updateNotif("Connecting…")
+        setState(CONNECTING)
         return START_STICKY
     }
 
@@ -211,6 +256,26 @@ class NavService : Service() {
             .setContentIntent(pi)
             .setOngoing(true)
             .build()
+    }
+
+    private var asleep = false
+
+    // Single place that publishes the link state: notification + broadcast.
+    private fun setState(st: String) {
+        if (linkState == st) return
+        linkState = st
+        val bond = Prefs.loadBond(this)
+        updateNotif(
+            when (st) {
+                CONNECTED -> "Connected to ${bond?.name ?: "device"}"
+                ASLEEP -> "Asleep - touch the device to wake it"
+                CONNECTING -> "Connecting..."
+                else -> "Searching for ${bond?.name ?: "device"}..."
+            }
+        )
+        sendBroadcast(
+            Intent(ACTION_STATE).setPackage(packageName).putExtra(EXTRA_STATE, st)
+        )
     }
 
     private fun updateNotif(text: String) {

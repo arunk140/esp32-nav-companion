@@ -5,13 +5,28 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <TextView
-        android:id="@+id/status"
-        android:text="Not paired"
-        android:textSize="18sp"
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:layout_marginBottom="24dp"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <View
+            android:id="@+id/linkDot"
+            android:background="@drawable/dot_gray"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:layout_marginEnd="10dp" />
+
+        <TextView
+            android:id="@+id/status"
+            android:text="Not paired"
+            android:textSize="18sp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
 
     <Button
         android:id="@+id/btnScan"
@@ -36,6 +51,13 @@
     <Button
         android:id="@+id/btnMedia"
         android:text="Enable media controls"
+        android:layout_marginTop="12dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <Button
+        android:id="@+id/btnSleep"
+        android:text="Sleep device (wake with touch)"
         android:layout_marginTop="12dp"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />

@@ -49,6 +49,7 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         const val CMD_UNPAIR: Byte = 0x04
         const val CMD_SET_BRIGHTNESS: Byte = 0x05
         const val CMD_PAIR: Byte = 0x06
+        const val CMD_SLEEP: Byte = 0x07
 
         // Firmware ATT MTU is 256 and its write buffer 256 B: never exceed.
         const val MAX_WRITE = 253
@@ -420,6 +421,10 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
     fun writePosition(payload: ByteArray) = write(POSITION_UUID, payload, "pos")
 
     fun writeCmd(payload: ByteArray) = write(CMD_UUID, payload, null)
+
+    // Device goes to deep sleep. Touch is the only way back, so the link
+    // drops and the service reconnects after the next touch.
+    fun cmdSleep() = writeCmd(byteArrayOf(CMD_SLEEP))
 
     fun cmdSetBrightness(pct: Int) =
         writeCmd(byteArrayOf(CMD_SET_BRIGHTNESS, pct.coerceIn(0, 100).toByte()))

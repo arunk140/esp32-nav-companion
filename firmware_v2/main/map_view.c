@@ -969,6 +969,23 @@ void map_view_set_fix(int32_t lat_e7, int32_t lon_e7, uint16_t speed_cms, uint16
     s_pos_dirty = true;
 }
 
+void map_view_flush_state(void)
+{
+    if (s_pos_dirty && s_has_fix) {
+        s_pos_dirty = false;
+        settings_set_last_pos(s_fix_lat, s_fix_lon);
+    }
+    if (s_zoom_dirty) {
+        s_zoom_dirty = false;
+        settings_set_zoom((uint8_t)s_zoom);
+    }
+}
+
+bool map_view_is_moving(void)
+{
+    return s_moving;
+}
+
 float map_view_rotation(void)
 {
     return s_rot;

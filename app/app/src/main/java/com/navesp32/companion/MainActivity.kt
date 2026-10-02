@@ -1,29 +1,46 @@
 package com.navesp32.companion
 
 import android.Manifest
+import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.navesp32.companion.databinding.ActivityMainBinding
 
 // Status, Scan QR, Connect, Unpair (confirm), service toggle, brightness slider.
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
     private lateinit var b: ActivityMainBinding
     private val handler = Handler(Looper.getMainLooper())
     private var brightJob: Runnable? = null
+
+    private val stateRx = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) = refresh()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
+        ContextCompat.registerReceiver(
+            this, stateRx, IntentFilter(NavService.ACTION_STATE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         requestPerms()
         refresh()
 
@@ -55,6 +72,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
+        }
+        b.btnSleep.setOnClickListener {
+            if (Prefs.loadBond(this) == null) {
+                toast("Scan QR first")
+                return@setOnClickListener
+            }
+            startService(Intent(this, NavService::class.java)
+                .setAction(NavService.ACTION_SLEEP))
+            toast("Device sleeping - touch its screen to wake")
         }
         b.btnMedia.setOnClickListener {
             // Media sessions of other apps are only readable with
@@ -95,16 +121,35 @@ class MainActivity : AppCompatActivity() {
         refresh()
     }
 
+    override fun onDestroy() {
+        try {
+            unregisterReceiver(stateRx)
+        } catch (e: Exception) {
+            Log.w(TAG, "stateRx: $e")
+        }
+        super.onDestroy()
+    }
+
     private fun refresh() {
         val bond = Prefs.loadBond(this)
+        val st = NavService.linkState
         b.status.text = if (bond == null) {
             "Not paired — tap Scan QR"
         } else {
-            "Device: ${bond.name} (${bond.mac})"
+            "${bond.name} (${bond.mac})\n${NavService.stateLabel(st)}"
         }
+        b.linkDot.setBackgroundResource(
+            when (st) {
+                NavService.CONNECTED -> R.drawable.dot_green
+                NavService.CONNECTING -> R.drawable.dot_amber
+                NavService.ASLEEP -> R.drawable.dot_blue
+                else -> R.drawable.dot_gray
+            }
+        )
         b.serviceToggle.isChecked = Prefs.serviceEnabled(this, bond != null)
         b.btnConnect.isEnabled = bond != null
         b.btnUnpair.isEnabled = bond != null
+        b.btnSleep.isEnabled = bond != null && st == NavService.CONNECTED
         val media = MediaListenerService.hasAccess(this)
         b.btnMedia.text = if (media) "Media controls: enabled" else "Enable media controls"
     }

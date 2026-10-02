@@ -15,6 +15,22 @@ config NAV_DEBUG_DEMO_WALK
     bool "Simulate GPS fixes (bench test, no phone needed)"
     default n
 
+config NAV_SLEEP_ENABLE
+    bool "Sleep when idle (screen off, then deep sleep)"
+    default y
+
+config NAV_SCREEN_OFF_MS
+    int "Screen off after this long without touch, phone or movement"
+    depends on NAV_SLEEP_ENABLE
+    range 5000 600000
+    default 60000
+
+config NAV_DEEP_SLEEP_MS
+    int "Deep sleep this long after the screen went off"
+    depends on NAV_SLEEP_ENABLE
+    range 10000 3600000
+    default 600000
+
 config NAV_TILE_CACHE_SLOTS
     int "Tile cache slots (128 KiB PSRAM each)"
     range 12 40

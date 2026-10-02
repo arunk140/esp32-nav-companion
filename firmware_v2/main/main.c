@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
 
@@ -33,6 +34,9 @@ static const char *TAG = "nav";
 #define UNPAIR_HOLD_MS 5000
 #define BRIGHTNESS_SAVE_MS 1500
 #define TOUCH_POLL_MS 10
+
+static void note_activity(void);
+static void enter_deep_sleep(void);
 
 typedef enum { EV_LINK_UP, EV_LINK_DOWN, EV_CMD } ev_type_t;
 
@@ -226,6 +230,9 @@ static void handle_cmd(const app_ev_t *ev)
             s_brightness_changed_ms = now_ms();
         }
         break;
+    case NAV_CMD_SLEEP:
+        enter_deep_sleep();
+        break;
     case NAV_CMD_PAIR:
         if (ev->len >= 6 && memcmp(ev->args, settings_token_str(), 6) == 0) {
             settings_set_paired(true);
@@ -244,6 +251,7 @@ static void process_events(void)
 {
     app_ev_t ev;
     while (xQueueReceive(s_ev_q, &ev, 0) == pdTRUE) {
+        note_activity();
         switch (ev.type) {
         case EV_LINK_UP:
             s_connected = true;
@@ -263,7 +271,10 @@ static void process_events(void)
     text_msg_t tm;
     if (xQueueReceive(s_text_q, &tm, 0) == pdTRUE) media_view_set_text(tm.title, tm.artist);
     nav_media_state_t ms;
-    if (xQueueReceive(s_media_q, &ms, 0) == pdTRUE) media_view_set_state(&ms);
+    if (xQueueReceive(s_media_q, &ms, 0) == pdTRUE) {
+        note_activity();
+        media_view_set_state(&ms);
+    }
     nav_position_t p;
     if (xQueueReceive(s_pos_q, &p, 0) == pdTRUE && valid_fix(&p)) {
         map_view_set_fix(p.lat_e7, p.lon_e7, p.speed_cms, p.cog_cdeg);
@@ -333,6 +344,58 @@ static void demo_walk(void)
 }
 #endif
 
+// ---- idle power management -------------------------------------------
+// Stage 1: backlight off after a while without touch, phone or movement.
+//   BLE stays up, so the phone reconnecting wakes the screen by itself.
+// Stage 2: deep sleep after longer idleness, which turns the radio off, so
+//   the phone cannot wake it - touch is the only way back.
+static uint32_t s_last_activity;
+static bool s_screen_off;
+
+static void note_activity(void)
+{
+    s_last_activity = now_ms();
+    if (s_screen_off) {
+        s_screen_off = false;
+        apply_brightness(settings_brightness());
+        ESP_LOGW(TAG, "screen on");
+    }
+}
+
+static void enter_deep_sleep(void)
+{
+    // Persist what the GUI task has been deferring, then go dark.
+    map_view_flush_state();
+    if (s_brightness_dirty) settings_set_brightness(s_brightness_pending);
+    board_backlight_set(0);
+    board_exio_set(EXIO_LCD_RST, false);  // panel controller into reset
+    touch_poll();                          // clear any pending frame: INT high
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ESP_LOGW(TAG, "deep sleep (touch to wake)");
+    // Touch INT (GPIO16) is the only usable wake source: it is an RTC pin.
+    // BOOT (GPIO0) would also wake, but holding it across the reset that
+    // follows would strap the chip into the bootloader.
+    esp_sleep_enable_ext1_wakeup_io(BIT64(16), ESP_EXT1_WAKEUP_ALL_LOW);
+    esp_deep_sleep_start();
+}
+
+static void power_tick(void)
+{
+#if CONFIG_NAV_SLEEP_ENABLE
+    // A live link means someone is using the device: never sleep. Timers
+    // start counting again from the moment the phone drops.
+    if (s_connected) return;
+    uint32_t idle = now_ms() - s_last_activity;
+    if (s_screen_off) {
+        if (idle >= CONFIG_NAV_DEEP_SLEEP_MS) enter_deep_sleep();
+    } else if (idle >= CONFIG_NAV_SCREEN_OFF_MS) {
+        s_screen_off = true;
+        board_backlight_set(0);
+        ESP_LOGW(TAG, "screen off");
+    }
+#endif
+}
+
 static void gui_task(void *arg)
 {
     (void)arg;
@@ -343,12 +406,16 @@ static void gui_task(void *arg)
         if (t - last_touch >= TOUCH_POLL_MS) {
             last_touch = t;
             touch_poll();
+            if (touch_get()->n) note_activity();
+            // Never sleep while moving: dim instead.
+            if (map_view_is_moving()) note_activity();
         }
 #if CONFIG_NAV_DEBUG_DEMO_WALK
         demo_walk();
 #endif
         process_events();
         poll_boot_button();
+        power_tick();
         map_view_tick();
         media_view_tick();
         if (s_screen_req != SCREEN_NONE) {
@@ -363,6 +430,7 @@ static void gui_task(void *arg)
             // First frame is on the glass: no boot garbage visible.
             backlight_on = true;
             apply_brightness(settings_brightness());
+            note_activity();
         }
         if (t - last_fps_pub > 1000) {
             last_fps_pub = t;
