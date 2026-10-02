@@ -6,7 +6,7 @@ Power: USB-powered, no battery in Phase 1. Ignore battery sense (GPIO4 floats wi
 
 Docs context: `docs/waveshare-2.8c/10-map-tiles-reference.md`, `02-pinout.md`, `03-display-touch-sensors.md`.
 
-Repo layout: `firmware/` (contract: `main/ble/ble_service.h`), `app/` (mirror: `BleManager.kt`), `docs/`, `3mf/`.
+Repo layout: `firmware_v2/` (contract: `main/ble_service.h`), `app/` (mirror: `BleManager.kt`), `docs/`, `3mf/`. (v1 firmware, superseded, was deleted in the firmware_v2 rewrite.)
 
 ## Scope
 

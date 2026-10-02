@@ -4,7 +4,7 @@ Monorepo: ESP32-S3 nav device firmware + Android companion app + docs.
 
 ```
 nav-esp32/
-  firmware/   ESP-IDF firmware (ESP32-S3-Touch-LCD-2.8C, LVGL 9, SD maps, BLE)
+  firmware_v2/ ESP-IDF firmware (ESP32-S3-Touch-LCD-2.8C, LVGL 9, SD maps, BLE, media controls)
   app/        Android companion app (QR pairing, BLE central, location stream)
   docs/       Reference docs, pinout, Phase 1 plan
   3mf/        Enclosure models (existing)

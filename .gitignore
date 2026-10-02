@@ -13,7 +13,6 @@ dependencies.lock
 
 # ---> esp-idf
 managed_components/
-components/map_tiles/  # forked, see firmware/components/README.md
 
 # ---> android
 app/build/

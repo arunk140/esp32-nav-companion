@@ -11,7 +11,6 @@ ESP32-S3 round-display nav device + Android companion app. Monorepo.
 ## Layout
 
 - `firmware_v2/` — **current firmware**, from-scratch rewrite (same BLE contract, tiles, partitions, NVS keys). ESP-IDF 5.5.2, LVGL 9.6, NimBLE. See `firmware_v2/README.md`. Build: `source ~/.espressif/tools/activate_idf_v5.5.2.sh && cd firmware_v2 && idf.py build && idf.py -p /dev/ttyACM0 flash`. Contract header: `firmware_v2/main/ble_service.h`.
-- `firmware/` — v1 (superseded; kept for reference).
 - `app/` — Kotlin, Gradle wrapper 9.3.1 (cached), AGP 8.13.2. Build: `cd app && ./gradlew :app:assembleDebug`. Java 25 only (Java 21 install is a stub).
 - `tools/` — `download_tiles.py` (MapTiler, polite), `make_test_tiles.py`
 - `tmp/` — tile staging, gitignored. Never commit tiles or binaries.
@@ -26,14 +25,14 @@ ESP32-S3 round-display nav device + Android companion app. Monorepo.
 5. **Init order is load-bearing:** I2C → EXIO → LCD → Touch → SD → BLE → LVGL → map. LCD before SD always (shared GPIO1/2); any LCD re-init must be followed by `SD_Init()`.
 6. **Five signals hide behind the TCA9554 expander** (LCD RST/CS, touch RST, SD CS, IMU INTs, buzzer). `EXIO_Init()` after I2C, before everything else. Only **two free GPIOs exist: 43/44**.
 7. **SD card requirements:** FAT32 + MBR partition table (GPT fails mount with FR_NO_FILESYSTEM=13), LFN enabled (`CONFIG_FATFS_LFN_HEAP=y`, else `street_map` reads as `STREET~1`), `format_if_mount_failed=false` (never auto-format user data). 1-bit bus @ 40 MHz.
-8. **BLE contract is mirrored:** `firmware/main/ble/ble_service.h` ↔ `app/.../BleManager.kt`. UUIDs are fixed — generated once, byte order is reverse-string (see `ble_uuid_to_str`). Change both sides together.
+8. **BLE contract is mirrored:** `firmware_v2/main/ble_service.h` ↔ `app/.../BleManager.kt` (media: `MediaBridge.kt`). UUIDs are fixed — generated once, byte order is reverse-string (see `ble_uuid_to_str`). Change both sides together.
 9. **Touch: single reader only.** `esp_lcd_touch get_coordinates` invalidates the sample — a second reader starves LVGL (press/release strobing, frozen drags). LVGL indev reads; everyone else uses `touch_last_sample()`.
 10. **LVGL 9, never 8.** Vendor demo is LVGL 8; we wrote a fresh port (`display/lvgl9_port.c`). `lv_display_set_buffers` (not `set_draw_buffers`).
 
 ## Debugging
 
 - Serial: `python3 -c` + pyserial, or `idf.py monitor`. Note: native USB re-enumerates on reset and kills handles; `esptool run` (soft reset) preserves them.
-- Decode crashes: `xtensa-esp32s3-elf-addr2line -e firmware/build/nav-esp32-fw.elf -f -C <addrs>`. Distinguish Interrupt WDT (starved CPU, backtrace shows victim) from Task WDT and from TLSF heap corruption (use-after-free elsewhere).
+- Decode crashes: `xtensa-esp32s3-elf-addr2line -e firmware_v2/build/nav-esp32-fw-v2.elf -f -C <addrs>`. Distinguish Interrupt WDT (starved CPU, backtrace shows victim) from Task WDT and from TLSF heap corruption (use-after-free elsewhere).
 - ModemManager grabs ttyACM — port-busy errors are usually an orphaned watcher (`fuser /dev/ttyACM0`, kill it), not hardware.
 - adb over Wi-Fi: `adb pair` + `adb connect`. Phone and PC on same Wi-Fi.
 
