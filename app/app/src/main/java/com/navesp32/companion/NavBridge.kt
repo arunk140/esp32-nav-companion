@@ -87,4 +87,11 @@ class NavBridge(private val out: Out) {
             )
         )
     }
+
+    // Link went down: forget the sticky street so a reconnect cannot reuse a
+    // name from the previous session. No write - there is no link to write to.
+    fun reset() {
+        lastStreet = null
+        sentState = false
+    }
 }

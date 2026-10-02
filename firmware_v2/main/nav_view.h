@@ -21,6 +21,10 @@ void nav_view_update(const nav_state_t *st, const char *street);
 // the status pill for the banner.
 bool nav_view_active(void);
 
+// Drop the current instruction (link lost / phone gone). Hides immediately
+// instead of waiting for the staleness timer.
+void nav_view_clear(void);
+
 // The banner is tappable while shown. Wire this to the same action as the
 // recentre button, which sits underneath the banner and is hidden during nav.
 void nav_view_set_click_cb(void (*cb)(void));

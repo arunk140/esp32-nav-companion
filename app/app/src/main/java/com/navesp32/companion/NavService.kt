@@ -247,7 +247,16 @@ class NavService : Service() {
                     connected = c
                     if (c) asleep = false
                     setState(if (c) CONNECTED else if (asleep) ASLEEP else CONNECTING)
-                    if (c) loc?.start() else loc?.stop()
+                    if (c) {
+                        loc?.start()
+                    } else {
+                        loc?.stop()
+                        // No link, no guidance: forget the bridge's sticky
+                        // street so a reconnect can't reuse a stale name, and
+                        // stop polling OsmAnd while the board cannot use it.
+                        nav?.reset()
+                        osmand?.stop()
+                    }
                 }
 
                 override fun onBonded() {

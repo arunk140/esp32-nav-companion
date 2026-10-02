@@ -306,6 +306,8 @@ static void process_events(void)
             s_connected = false;
             map_view_set_link(false, settings_paired());
             media_view_set_link(false);
+            // The phone is the navigation source: no link means no guidance.
+            nav_view_clear();
             break;
         case EV_CMD:
             handle_cmd(&ev);

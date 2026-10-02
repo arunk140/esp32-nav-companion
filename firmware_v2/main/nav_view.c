@@ -362,3 +362,13 @@ bool nav_view_active(void)
 {
     return s_have && (s_st.flags & NAV_F_ACTIVE) && (now_ms() - s_last_ms) < STALE_MS;
 }
+
+void nav_view_clear(void)
+{
+    s_have = false;
+    s_street[0] = '\0';
+    if (s_banner) {
+        if (s_lbl_street) lv_label_set_text(s_lbl_street, "");
+        lv_obj_set_hidden(s_banner, true);
+    }
+}
