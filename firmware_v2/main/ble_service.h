@@ -34,8 +34,13 @@
 //   0x02 ART (11 B + data): u8 type, u16 art id, u32 offset, u32 total, data
 //        Chunks of one 200x200 baseline JPEG (<= NAV_ART_MAX_BYTES), sent in
 //        order. A new art id abandons any transfer in progress.
+//   0x03 TEXT (<= 160 B, only when the track changes): u8 type, title, 0x00,
+//        artist, 0x00 — UTF-8, but the device only has a Latin font, so it
+//        drops anything else rather than showing empty boxes.
 #define NAV_MEDIA_STATE 0x01
 #define NAV_MEDIA_ART 0x02
+#define NAV_MEDIA_TEXT 0x03
+#define NAV_MEDIA_TEXT_MAX 160
 #define NAV_MEDIA_STATE_LEN 13
 #define NAV_MEDIA_ART_HDR 11
 #define NAV_MEDIA_F_PLAYING 0x01
@@ -95,6 +100,8 @@ typedef struct {
     void (*on_media_state)(const nav_media_state_t *st);
     // A whole ART write, header included (data[0] == NAV_MEDIA_ART).
     void (*on_media_art)(const uint8_t *data, size_t len);
+    // Title and artist of the current track, NUL-separated.
+    void (*on_media_text)(const char *title, const char *artist);
 } nav_ble_cbs_t;
 
 void nav_ble_start(const nav_ble_cbs_t *cbs, const char *device_name);

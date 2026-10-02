@@ -92,10 +92,12 @@ BLE extension (existing UUIDs unchanged, mirrored in `BleManager.kt` / `MediaBri
 
 | Characteristic | UUID | Direction | Payload |
 | --- | --- | --- | --- |
-| MEDIA_INFO | `790d1d86-2191-404d-a0f5-0e960990e190` | phone → device, write-no-rsp | `0x01` STATE (13 B): flags (playing/session/no-access), volume %, u32 position ms, u32 duration ms, u16 art id. `0x02` ART: u16 id, u32 offset, u32 total, data = 200×200 baseline JPEG ≤ 48 KB |
+| MEDIA_INFO | `790d1d86-2191-404d-a0f5-0e960990e190` | phone → device, write-no-rsp | `0x01` STATE (13 B): flags (playing/session/no-access), volume %, u32 position ms, u32 duration ms, u16 art id. `0x02` ART: u16 id, u32 offset, u32 total, data = 200×200 baseline JPEG ≤ 48 KB. `0x03` TEXT (on track change): title, NUL, artist |
 | MEDIA_CMD | `f8a580f6-aa84-4898-ad67-a66c12262ac1` | device → phone, notify | `1` play/pause, `2` next, `3` prev, `4` vol+, `5` vol−, `6` set volume (u8 %), `7` resync |
 
 - STATE is sent only on changes; the device advances the progress ring itself.
+- Title and artist show above the album art, and in a toast over the map when the track changes. The board font is Latin-only, so `media_view.c` drops non-Latin characters instead of drawing empty boxes; long titles are ellipsised (toast: clipped to 37 chars).
+- The map's overlay buttons are translucent white with a drop shadow, so they read as floating controls.
 - If art for the current track is missing or stalls for 3 s, the device sends a resync.
 - **GATT cache:** the device sends Service Changed on every boot, so bonded phones re-read the characteristic table after firmware updates. As a fallback, the app clears Android's GATT cache (`refresh()`) once if the media characteristics are missing.
 - **App requirement:** Notification access, needed by Android to read other apps' media sessions. The *Enable media controls* button opens the setting.

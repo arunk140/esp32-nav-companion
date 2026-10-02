@@ -25,6 +25,9 @@ void map_view_recenter(void);
 // pill has been held for 15 s: same as holding BOOT for 5 s.
 void map_view_set_reset_cb(void (*cb)(void));
 
+// Shows a short message over the map. No-op on other screens.
+void map_view_toast(const char *txt);
+
 // Called from the music button's click event: the callee must defer any
 // screen change (it would delete the button inside its own event).
 void map_view_set_media_cb(void (*cb)(void));

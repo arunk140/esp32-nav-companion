@@ -3,6 +3,7 @@
 #include "media_art.h"
 #include "ui_common.h"
 #include "esp_timer.h"
+#include <stdio.h>
 
 // Layout (480x480 round). Art centred above the middle so the transport row
 // fits below; volume and back sit where zoom and the music button are on
@@ -42,8 +43,13 @@ static bool s_vol_dragging;
 static lv_obj_t *s_root, *s_img, *s_placeholder, *s_prog, *s_vol, *s_msg;
 static lv_obj_t *s_btn_play, *s_lbl_play, *s_btn_prev, *s_btn_next, *s_btn_up, *s_btn_dn;
 static void (*s_on_back)(void);
+static void (*s_change_cb)(void);
+static uint16_t s_seen_art;
+static bool s_pending_change;
 static int32_t s_prog_shown = -1;
 static int s_msg_key = -1;
+static char s_title[72], s_artist[56];
+static lv_obj_t *s_lbl_title, *s_lbl_artist;
 
 static inline uint32_t now_ms(void)
 {
@@ -69,6 +75,47 @@ static uint32_t position_now(void)
 }
 
 // ---------------------------------------------------------------- refresh
+
+// Keeps 7-bit ASCII and Latin-1 (the font covers those); drops the rest,
+// which is every non-Latin UTF-8 byte. Stops at the first space run.
+static void sanitise(char *dst, size_t cap, const char *src)
+{
+    size_t o = 0;
+    bool sp = false;
+    for (const unsigned char *p = (const unsigned char *)src; *p && o + 1 < cap; p++) {
+        unsigned char c = *p;
+        if (c >= 0x80 && c < 0xA0) continue;      // UTF-8 lead/continuation
+        if (c < 0x20 || c == 0x7F) {
+            sp = o > 0;
+            continue;
+        }
+        if (c == ' ') {
+            if (sp) continue;
+            sp = true;
+            c = ' ';
+        } else {
+            sp = false;
+        }
+        dst[o++] = (char)c;
+    }
+    while (o > 0 && dst[o - 1] == ' ') o--;
+    dst[o] = '\0';
+    if (!dst[0]) snprintf(dst, cap, "?");
+}
+
+void media_view_set_text(const char *title, const char *artist)
+{
+    sanitise(s_title, sizeof(s_title), title);
+    sanitise(s_artist, sizeof(s_artist), artist);
+    if (!s_lbl_title) return;
+    lv_label_set_text(s_lbl_title, s_title);
+    lv_label_set_text(s_lbl_artist, s_artist);
+}
+
+const char *media_view_title(void)
+{
+    return s_title;
+}
 
 static void refresh_art(void)
 {
@@ -130,7 +177,11 @@ static void refresh_controls(void)
     }
     if (key == s_msg_key) return;
     s_msg_key = key;
+    bool have_track = key == 0;
     lv_label_set_text(s_msg, txt);
+    lv_obj_set_hidden(s_msg, have_track);
+    lv_obj_set_hidden(s_lbl_title, !have_track);
+    lv_obj_set_hidden(s_lbl_artist, !have_track);
 }
 
 // ---------------------------------------------------------------- input
@@ -277,10 +328,33 @@ void media_view_create(lv_obj_t *parent, void (*on_back)(void))
     s_btn_play = ui_round_button(parent, LV_SYMBOL_PLAY, 240, ROW_Y, 76, &lv_font_montserrat_40, play_cb);
     s_lbl_play = lv_obj_get_child(s_btn_play, 0);
 
+    // Title + artist sit above the art: the progress and volume rings leave
+    // no room under it. The status message takes the title's place.
+    s_lbl_title = lv_label_create(parent);
+    lv_obj_set_width(s_lbl_title, 360);
+    lv_obj_set_style_text_align(s_lbl_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_lbl_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_lbl_title, lv_color_white(), 0);
+    lv_obj_align(s_lbl_title, LV_ALIGN_TOP_MID, 0, 34);
+    lv_label_set_text(s_lbl_title, s_title);
+
+    s_lbl_artist = lv_label_create(parent);
+    lv_obj_set_width(s_lbl_artist, 360);
+    lv_obj_set_style_text_align(s_lbl_artist, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_artist, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_lbl_artist, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_lbl_artist, lv_color_hex(COL_TEXT), 0);
+    lv_obj_align(s_lbl_artist, LV_ALIGN_TOP_MID, 0, 55);
+    lv_label_set_text(s_lbl_artist, s_artist);
+
     s_msg = lv_label_create(parent);
+    lv_obj_set_width(s_msg, 380);
+    lv_obj_set_style_text_align(s_msg, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_msg, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(s_msg, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_msg, lv_color_hex(COL_TEXT), 0);
-    lv_obj_align(s_msg, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_align(s_msg, LV_ALIGN_TOP_MID, 0, 34);
     lv_label_set_text(s_msg, "");
 
     s_prog_shown = -1;
@@ -291,10 +365,16 @@ void media_view_create(lv_obj_t *parent, void (*on_back)(void))
     refresh_controls();
 }
 
+void media_view_set_change_cb(void (*cb)(void))
+{
+    s_change_cb = cb;
+}
+
 void media_view_destroy(void)
 {
     // Objects are deleted by the caller cleaning the screen.
     s_root = s_img = s_placeholder = s_prog = s_vol = s_msg = NULL;
+    s_lbl_title = s_lbl_artist = NULL;
     s_btn_play = s_lbl_play = s_btn_prev = s_btn_next = s_btn_up = s_btn_dn = NULL;
     s_vol_dragging = false;
 }
@@ -308,15 +388,25 @@ bool media_view_active(void)
 
 void media_view_set_state(const nav_media_state_t *st)
 {
+    // The phone resends STATE about once a second while playing; a toast is
+    // only wanted when the track really changed (art id changes with it).
+    bool changed = st->art_id != 0 && s_have_state && st->art_id != s_st.art_id;
+    if (!s_have_state) s_seen_art = 0;
+    if (changed) s_pending_change = true;
     s_st = *st;
     s_have_state = true;
     s_st_t0 = now_ms();
+    s_seen_art = st->art_id;
     s_prog_shown = -1;
     refresh_art();
     refresh_play();
     refresh_volume();
     refresh_progress();
     refresh_controls();
+    if (s_msg_key == 0) {  // a new track: labels are current again
+        lv_label_set_text(s_lbl_title, s_title);
+        lv_label_set_text(s_lbl_artist, s_artist);
+    }
 }
 
 void media_view_set_link(bool connected)
@@ -349,6 +439,11 @@ void media_view_tick(void)
         nav_ble_media_cmd(NAV_MCMD_SYNC, 0);
     }
 
+    // Track changed while another screen is up (map mode): report it there.
+    if (s_pending_change && !s_root) {
+        s_pending_change = false;
+        if (s_change_cb) s_change_cb();
+    }
     if (!s_root) return;
 
     if (s_vol_pending >= 0 && t - s_vol_sent_ms >= VOL_SEND_MS) {

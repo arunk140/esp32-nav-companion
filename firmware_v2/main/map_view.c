@@ -643,9 +643,6 @@ static void apply_zoom(int z, int ax, int ay)
     tiles_set_active_zoom(z);
     s_zoom_dirty = true;
     s_zoom_changed_ms = now_ms();
-    char buf[16];
-    lv_snprintf(buf, sizeof(buf), "Zoom %d", z);
-    show_toast(buf);
     update_buttons();
     invalidate();
 }
@@ -782,6 +779,12 @@ static void pill_event_cb(lv_event_t *e)
         s_hold_t0 = 0;
         s_hold_shown = -1;
     }
+}
+
+void map_view_toast(const char *txt)
+{
+    if (!s_toast) return;  // not on the map screen
+    show_toast(txt);
 }
 
 void map_view_set_reset_cb(void (*cb)(void))

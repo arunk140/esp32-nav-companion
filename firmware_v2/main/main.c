@@ -46,6 +46,7 @@ typedef struct {
 static QueueHandle_t s_ev_q;   // commands + link changes, in order
 static QueueHandle_t s_pos_q;    // latest position only (overwrite)
 static QueueHandle_t s_media_q;  // latest media state only (overwrite)
+static QueueHandle_t s_text_q;   // latest track title/artist (overwrite)
 
 typedef enum { SCREEN_NONE, SCREEN_PAIR, SCREEN_MAP, SCREEN_MEDIA } screen_t;
 static screen_t s_screen = SCREEN_NONE;
@@ -82,6 +83,19 @@ static void ble_on_cmd(uint8_t code, const uint8_t *args, size_t len)
 static void ble_on_media_state(const nav_media_state_t *st)
 {
     xQueueOverwrite(s_media_q, st);
+}
+
+typedef struct {
+    char title[72];
+    char artist[56];
+} text_msg_t;
+
+static void ble_on_media_text(const char *title, const char *artist)
+{
+    text_msg_t m;
+    snprintf(m.title, sizeof(m.title), "%s", title);
+    snprintf(m.artist, sizeof(m.artist), "%s", artist);
+    xQueueOverwrite(s_text_q, &m);
 }
 
 static void ble_on_link(bool up)
@@ -151,6 +165,22 @@ static void unpair(bool remote)
     map_view_set_link(false, false);
     s_screen = SCREEN_NONE;  // rebuild the QR with the new token
     show_screen(SCREEN_PAIR);
+}
+
+static void media_changed(void)
+{
+    // The toast has a fixed width, so clip long titles instead of letting the
+    // label run off the round screen.
+    const char *t = media_view_title();
+    char buf[40];
+    size_t n = strnlen(t, sizeof(buf) - 1);
+    memcpy(buf, t, n);
+    if (strlen(t) > n) {
+        memcpy(buf + n, "...", 4);
+    } else {
+        buf[n] = '\0';
+    }
+    map_view_toast(buf);
 }
 
 static void local_reset(void)
@@ -223,6 +253,8 @@ static void process_events(void)
             break;
         }
     }
+    text_msg_t tm;
+    if (xQueueReceive(s_text_q, &tm, 0) == pdTRUE) media_view_set_text(tm.title, tm.artist);
     nav_media_state_t ms;
     if (xQueueReceive(s_media_q, &ms, 0) == pdTRUE) media_view_set_state(&ms);
     nav_position_t p;
@@ -359,11 +391,13 @@ void app_main(void)
     map_view_init_state();
     map_view_set_reset_cb(local_reset);
     map_view_set_media_cb(open_media);
+    media_view_set_change_cb(media_changed);
     media_art_init();
 
     s_ev_q = xQueueCreate(16, sizeof(app_ev_t));
     s_pos_q = xQueueCreate(1, sizeof(nav_position_t));
     s_media_q = xQueueCreate(1, sizeof(nav_media_state_t));
+    s_text_q = xQueueCreate(1, sizeof(text_msg_t));
 
     show_screen(settings_paired() ? SCREEN_MAP : SCREEN_PAIR);
 
@@ -373,6 +407,7 @@ void app_main(void)
         .on_link = ble_on_link,
         .on_media_state = ble_on_media_state,
         .on_media_art = media_art_feed,
+        .on_media_text = ble_on_media_text,
     };
     nav_ble_start(&cbs, settings_device_name());
 

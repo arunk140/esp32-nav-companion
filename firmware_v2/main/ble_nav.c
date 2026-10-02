@@ -105,6 +105,14 @@ static int chr_media_info(uint16_t conn, uint16_t attr, struct ble_gatt_access_c
             .art_id = le16(b + 11),
         };
         if (s_cbs.on_media_state) s_cbs.on_media_state(&st);
+    } else if (b[0] == NAV_MEDIA_TEXT) {
+        if (len < 3) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        char txt[NAV_MEDIA_TEXT_MAX + 1];
+        memcpy(txt, b + 1, len - 1);
+        txt[len - 1] = '\0';
+        char *artist = strchr(txt, '\0');
+        artist = artist ? artist + 1 : txt + strlen(txt);
+        if (s_cbs.on_media_text) s_cbs.on_media_text(txt, artist);
     } else if (b[0] == NAV_MEDIA_ART) {
         if (len < NAV_MEDIA_ART_HDR) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         if (s_cbs.on_media_art) s_cbs.on_media_art(b, len);

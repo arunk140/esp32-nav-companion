@@ -16,4 +16,13 @@ bool media_view_active(void);
 void media_view_tick(void);
 
 void media_view_set_state(const nav_media_state_t *st);
+
+// Track title / artist for the current media state. Non-Latin characters are
+// dropped (the board font has no glyphs for them).
+void media_view_set_text(const char *title, const char *artist);
+const char *media_view_title(void);
 void media_view_set_link(bool connected);
+
+// Called once when the phone's track changes while this page is on screen
+// (the map uses it for a toast). Fires from the GUI task.
+void media_view_set_change_cb(void (*cb)(void));

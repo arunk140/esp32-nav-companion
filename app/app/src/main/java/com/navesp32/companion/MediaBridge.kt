@@ -53,9 +53,6 @@ class MediaBridge(private val ctx: Context, private val out: Out) {
     private var running = false
     private var listening = false
     private var controller: MediaController? = null
-    private var artId = 0
-    private var artJpeg: ByteArray? = null
-    private var artGen = 0
 
     // ---- lifecycle ----
 
@@ -194,7 +191,27 @@ class MediaBridge(private val ctx: Context, private val out: Out) {
         Log.i(TAG, "art ${"%04x".format(artId)} sent: ${jpeg.size} B")
     }
 
+    // Text arrives as its own short message, only when the track changes, so
+    // the per-second STATE stays 13 bytes. The device has a Latin-only font
+    // and drops anything else.
+    private fun sendText(title: String, artist: String) {
+        if (!out.mediaLinkReady()) return
+        val t = title.take(72).toByteArray(Charsets.UTF_8)
+        val a = artist.take(56).toByteArray(Charsets.UTF_8)
+        val b = ByteBuffer.allocate(1 + t.size + 1 + a.size)
+        b.put(0x03)
+        b.put(t)
+        b.put(0)
+        b.put(a)
+        out.mediaWrite(b.array(), "mtext")
+    }
+
     fun sendAll() {
+        val md = controller?.metadata
+        sendText(
+            md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "",
+            md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+        )
         sendState(force = true)
         sendArt()
     }
@@ -203,6 +220,9 @@ class MediaBridge(private val ctx: Context, private val out: Out) {
 
     private var artTrack: String? = null   // track the current art belongs to
     private var artSrc: String? = null     // art source last tried for it
+    private var artId = 0
+    private var artJpeg: ByteArray? = null
+    private var artGen = 0
 
     private fun updateArt(md: MediaMetadata?) {
         if (md == null) {
@@ -230,12 +250,14 @@ class MediaBridge(private val ctx: Context, private val out: Out) {
         }
         if (track != artTrack) {
             // New track: drop the old art right away (the device shows a
-            // placeholder rather than the previous song's cover).
+            // placeholder rather than the previous song's cover), and tell
+            // the device the new title.
             artTrack = track
             artSrc = null
             artGen++
             artId = 0
             artJpeg = null
+            sendText(title, artist)
         } else if (artId != 0 || src == null || src == artSrc) {
             // Already have art for this track (players re-send metadata,
             // often with a re-scaled bitmap), or nothing new to try.
