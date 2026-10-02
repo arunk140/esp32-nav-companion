@@ -274,6 +274,8 @@ static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
 #define LINK_W 3
 #define LINK_STEP 1
 #define LINK_ANIM_MS 220   // ~4.5 fps: calm march, one cycle in ~3.5 s
+#define LINK_BOW 0.22f     // perpendicular control offset, fraction of chord
+#define LINK_SEG 96        // curve samples; fine enough that dots look round
 
 // White on a dark map, light grey on a light one.
 #define LINK_COL_DARK 0xFFFFFF
@@ -285,7 +287,15 @@ static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
     float dx = (float)(x1 - x0), dy = (float)(y1 - y0);
     float len = sqrtf(dx * dx + dy * dy);
     if (len < 4.0f) return;
-    float ux = dx / len, uy = dy / len;
+
+    // Quadratic Bezier from us to the destination, with the control point
+    // pushed perpendicular to the chord so the path bows to one side. The bow
+    // scales with the chord length, so short and long hops look alike.
+    float ux = dx / len, uy = dy / len;          // along the chord
+    float px = -uy, py = ux;                     // perpendicular (screen space)
+    float mx = (x0 + x1) * 0.5f, my = (y0 + y1) * 0.5f;
+    float bow = len * LINK_BOW;                  // 0 = straight
+    float cxp = mx + px * bow, cyp = my + py * bow;
 
     lv_draw_rect_dsc_t d;
     lv_draw_rect_dsc_init(&d);
@@ -294,23 +304,39 @@ static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
     d.bg_opa = LV_OPA_70;
     d.border_opa = LV_OPA_TRANSP;
 
+    // Walk the curve by parameter t (not arclength): dashes stay roughly even
+    // on gentle bows, which is all we need here. Sample in fine steps and paint
+    // a dot wherever the running offset falls in a dash window.
     const int period = LINK_DASH + LINK_GAP;
     int32_t p = phase % period;
-    for (float s = (float)p - period; s < len; s += period) {
-        float a = s < 0 ? 0 : s;
-        float b = s + LINK_DASH;
-        if (a >= len) break;
-        if (b > len) b = len;
-        if (b - a < 1.0f) continue;
-        int32_t ax = (int32_t)lroundf(x0 + ux * a), ay = (int32_t)lroundf(y0 + uy * a);
-        int32_t bx = (int32_t)lroundf(x0 + ux * b), by = (int32_t)lroundf(y0 + uy * b);
-        lv_area_t e = {
-            .x1 = (ax < bx ? ax : bx) - LINK_W / 2,
-            .y1 = (ay < by ? ay : by) - LINK_W / 2,
-            .x2 = (ax < bx ? bx : ax) + LINK_W / 2,
-            .y2 = (ay < by ? by : ay) + LINK_W / 2,
-        };
-        lv_draw_rect(layer, &d, &e);
+    float s_off = 0.0f;   // arclength travelled along the curve
+    lv_point_precise_t prev = {x0, y0};
+    for (int64_t i = 0; i <= LINK_SEG; i++) {
+        float t = (float)i / (float)LINK_SEG;
+        float omt = 1.0f - t;
+        float bx = omt * omt * x0 + 2.0f * omt * t * cxp + t * t * x1;
+        float by = omt * omt * y0 + 2.0f * omt * t * cyp + t * t * y1;
+        if (i > 0) {
+            // Offset along the curve, advanced by the segment length so the
+            // dash phase marches consistently along the whole path.
+            float seg = sqrtf((bx - prev.x) * (bx - prev.x) +
+                              (by - prev.y) * (by - prev.y));
+            float s = s_off;
+            s_off += seg;
+            // Dots are placed where (s + phase) lands in the dash window.
+            float off = fmodf(s + (float)p, (float)period);
+            if (off >= 0 && off < (float)LINK_DASH) {
+                lv_area_t e = {
+                    .x1 = (int32_t)lroundf(bx) - LINK_W / 2,
+                    .y1 = (int32_t)lroundf(by) - LINK_W / 2,
+                    .x2 = (int32_t)lroundf(bx) + LINK_W / 2,
+                    .y2 = (int32_t)lroundf(by) + LINK_W / 2,
+                };
+                lv_draw_rect(layer, &d, &e);
+            }
+        }
+        prev.x = bx;
+        prev.y = by;
     }
 }
 
