@@ -14,6 +14,7 @@ idf_component_register(
     "media_art.c"
     "media_view.c"
     "nav_view.c"
+    "call_view.c"
     "ui_common.c"
   INCLUDE_DIRS "."
   REQUIRES

@@ -32,6 +32,8 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         fun onStatus(batteryMv: Int, link: Int, darkMap: Boolean)
         fun onMediaReady() {}
         fun onMediaCmd(cmd: ByteArray) {}
+        fun onCallReady() {}
+        fun onCallCmd(cmd: ByteArray) {}
     }
 
     companion object {
@@ -42,6 +44,8 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         const val MEDIA_INFO_UUID = "790d1d86-2191-404d-a0f5-0e960990e190"
         const val MEDIA_CMD_UUID = "f8a580f6-aa84-4898-ad67-a66c12262ac1"
         const val NAV_STATE_UUID = "7c3d1f92-5a6b-4d18-9e2f-8b41c05d7a63"
+        const val CALL_INFO_UUID = "3f9a2b41-6c7d-4e58-9a1b-2d4e6f8a0c13"
+        const val CALL_CMD_UUID = "8e1c7d35-2b4a-4f60-9c3e-5a7b1d2e4f68"
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         const val CMD_RECENTER: Byte = 0x01
@@ -58,7 +62,8 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
 
         private const val TAG = "BleManager"
         private val REQUIRED = listOf(
-            POSITION_UUID, CMD_UUID, STATUS_UUID, MEDIA_INFO_UUID, MEDIA_CMD_UUID, NAV_STATE_UUID
+            POSITION_UUID, CMD_UUID, STATUS_UUID, MEDIA_INFO_UUID, MEDIA_CMD_UUID,
+            NAV_STATE_UUID, CALL_INFO_UUID, CALL_CMD_UUID
         )
 
         private const val OP_TIMEOUT_MS = 3000L
@@ -196,6 +201,8 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         private set
     var mediaReady = false
         private set
+    var callReady = false
+        private set
 
     private fun chr(uuid: UUID) = chars[uuid]
     private fun chr(uuid: String) = chars[UUID.fromString(uuid)]
@@ -251,12 +258,19 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
 
         override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
             handler.post {
-                if (d.characteristic.uuid == UUID.fromString(MEDIA_CMD_UUID) &&
-                    status == BluetoothGatt.GATT_SUCCESS && chr(MEDIA_INFO_UUID) != null
-                ) {
-                    mediaReady = true
-                    Log.i(TAG, "media channel ready")
-                    cb.onMediaReady()
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    when (d.characteristic.uuid) {
+                        UUID.fromString(MEDIA_CMD_UUID) -> if (chr(MEDIA_INFO_UUID) != null) {
+                            mediaReady = true
+                            Log.i(TAG, "media channel ready")
+                            cb.onMediaReady()
+                        }
+                        UUID.fromString(CALL_CMD_UUID) -> if (chr(CALL_INFO_UUID) != null) {
+                            callReady = true
+                            Log.i(TAG, "call channel ready")
+                            cb.onCallReady()
+                        }
+                    }
                 }
                 opDone()
             }
@@ -288,9 +302,16 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
 
         override fun onCharacteristicChanged(g: BluetoothGatt, ch: BluetoothGattCharacteristic,
                                              value: ByteArray) {
-            if (ch.uuid == UUID.fromString(MEDIA_CMD_UUID) && value.isNotEmpty()) {
-                val copy = value.copyOf()
-                handler.post { cb.onMediaCmd(copy) }
+            if (value.isEmpty()) return
+            when (ch.uuid) {
+                UUID.fromString(MEDIA_CMD_UUID) -> {
+                    val copy = value.copyOf()
+                    handler.post { cb.onMediaCmd(copy) }
+                }
+                UUID.fromString(CALL_CMD_UUID) -> {
+                    val copy = value.copyOf()
+                    handler.post { cb.onCallCmd(copy) }
+                }
             }
         }
 
@@ -355,12 +376,14 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         enqueue(Op.Mtu(517))
         if (chr(STATUS_UUID) != null) enqueue(Op.Read(UUID.fromString(STATUS_UUID)))
         if (chr(MEDIA_CMD_UUID) != null) enqueue(Op.Subscribe(UUID.fromString(MEDIA_CMD_UUID)))
+        if (chr(CALL_CMD_UUID) != null) enqueue(Op.Subscribe(UUID.fromString(CALL_CMD_UUID)))
         ensureBonded()
     }
 
     private fun rediscover(g: BluetoothGatt) {
         if (g != gatt) return
         mediaReady = false
+        callReady = false
         chars.clear()
         ops.clear()
         startDiscovery(g)
@@ -456,6 +479,8 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
 
     fun writeNav(payload: ByteArray, tag: String?) = write(NAV_STATE_UUID, payload, tag)
 
+    fun writeCall(payload: ByteArray, tag: String?) = write(CALL_INFO_UUID, payload, tag)
+
     fun maxWrite(): Int = minOf(mtu - 3, MAX_WRITE)
 
     // Short bursts (album art): ask for the fastest connection interval.
@@ -514,6 +539,7 @@ class BleManager(private val ctx: Context, private val cb: Cb) {
         rediscoverAfter = false
         linkUp = false
         mediaReady = false
+        callReady = false
         mtu = 23
     }
 

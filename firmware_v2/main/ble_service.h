@@ -98,6 +98,29 @@
 #define NAV_MCMD_SET_VOLUME 0x06  // u8 0-100
 #define NAV_MCMD_SYNC 0x07        // resend STATE + ART
 
+// Incoming-call screen (added 2026-10-03). Phone-side mirror: CallBridge.kt.
+// Only ring/end are sent; the device decides what to show. Answer/reject go
+// back on CALL_CMD.
+//   0x01 RING: u8 type, name, 0x00, number, 0x00 — UTF-8. The phone sends this
+//        once when a call starts ringing. Either field may be empty: no
+//        contact match (name) or no READ_CALL_LOG (number). The device drops
+//        non-Latin characters, same as media/nav text.
+//   0x02 END: u8 type — the call is no longer ringing (answered elsewhere,
+//        rejected, or missed). Hides the screen.
+#define NAV_CHR_CALL_INFO_UUID "3f9a2b41-6c7d-4e58-9a1b-2d4e6f8a0c13"
+#define NAV_CHR_CALL_CMD_UUID "8e1c7d35-2b4a-4f60-9c3e-5a7b1d2e4f68"
+#define NAV_CHR_CALL_INFO_UUID_LE 0x13, 0x0c, 0x8a, 0x6f, 0x4e, 0x2d, 0x1b, 0x9a, \
+                                  0x58, 0x4e, 0x7d, 0x6c, 0x41, 0x2b, 0x9a, 0x3f
+#define NAV_CHR_CALL_CMD_UUID_LE 0x68, 0x4f, 0x2e, 0x1d, 0x7b, 0x5a, 0x3e, 0x9c, \
+                                 0x60, 0x4f, 0x4a, 0x2b, 0x35, 0x7d, 0x1c, 0x8e
+#define NAV_CALL_RING 0x01
+#define NAV_CALL_END 0x02
+#define NAV_CALL_TEXT_MAX 96
+
+// CALL_CMD (device -> phone, notify): u8 cmd
+#define NAV_CCMD_ANSWER 0x01
+#define NAV_CCMD_REJECT 0x02
+
 // CMD (write, 1 opcode byte + args)
 #define NAV_CMD_RECENTER 0x01
 #define NAV_CMD_SET_ZOOM 0x02        // u8 zoom
@@ -156,6 +179,12 @@ typedef struct {
     // Title and artist of the current track, NUL-separated.
     void (*on_media_text)(const char *title, const char *artist);
 
+    // Incoming call started ringing. name/number may be empty; both may
+    // contain non-Latin characters (the GUI drops what it cannot draw).
+    void (*on_call_ring)(const char *name, const char *number);
+    // Ringing stopped (answered, rejected or missed): hide the call screen.
+    void (*on_call_end)(void);
+
     // Navigation: NAV_STATE decoded (st may be NULL when only TEXT arrived,
     // because the two are separate writes); street may be empty.
     void (*on_nav_state)(const nav_state_t *st, const char *street);
@@ -173,6 +202,11 @@ void nav_ble_set_theme(uint8_t dark);  // reported back in STATUS
 // subscribed).
 void nav_ble_media_cmd(uint8_t cmd, uint8_t arg);
 bool nav_ble_media_ready(void);
+
+// Sends a CALL_CMD notification (any task; no-op unless the phone has
+// subscribed).
+void nav_ble_call_cmd(uint8_t cmd);
+bool nav_ble_call_ready(void);
 
 // Both are safe from any task (work is posted to the NimBLE host task).
 // Drops the current link; bonds are kept.

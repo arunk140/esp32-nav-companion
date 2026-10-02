@@ -23,10 +23,13 @@ static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile uint8_t s_fps;
 static uint16_t s_status_h;
 static volatile uint8_t s_theme;
-static struct ble_npl_event s_forget_ev, s_disc_ev, s_mcmd_ev;
+static struct ble_npl_event s_forget_ev, s_disc_ev, s_mcmd_ev, s_ccmd_ev;
 static uint16_t s_media_cmd_h;
 static volatile bool s_media_sub;
 static QueueHandle_t s_mcmd_q;  // GUI -> host task, 2-byte commands
+static uint16_t s_call_cmd_h;
+static volatile bool s_call_sub;
+static QueueHandle_t s_ccmd_q;  // GUI -> host task, 1-byte commands
 
 static void advertise(void);
 
@@ -131,6 +134,43 @@ static int chr_media_cmd(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
     return os_mbuf_append(ctxt->om, &z, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static int chr_call_info(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn;
+    (void)attr;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    uint8_t b[NAV_CALL_TEXT_MAX + 2];
+    if (len < 1 || len > sizeof(b)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    if (ble_hs_mbuf_to_flat(ctxt->om, b, sizeof(b), NULL) != 0) return BLE_ATT_ERR_UNLIKELY;
+    if (b[0] == NAV_CALL_RING) {
+        // "name\0number" after the type byte. Cap and terminate: the sender's
+        // lengths are never trusted.
+        char txt[NAV_CALL_TEXT_MAX + 1];
+        size_t n = len - 1;
+        if (n > NAV_CALL_TEXT_MAX) n = NAV_CALL_TEXT_MAX;
+        memcpy(txt, b + 1, n);
+        txt[n] = '\0';
+        char *number = strchr(txt, '\0');
+        number = number ? number + 1 : txt + strlen(txt);
+        if (s_cbs.on_call_ring) s_cbs.on_call_ring(txt, number);
+    } else if (b[0] == NAV_CALL_END) {
+        if (s_cbs.on_call_end) s_cbs.on_call_end();
+    }
+    return 0;
+}
+
+static int chr_call_cmd(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn;
+    (void)attr;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+    uint8_t z = 0;
+    return os_mbuf_append(ctxt->om, &z, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const ble_uuid128_t s_svc_uuid = BLE_UUID128_INIT(NAV_SVC_UUID_LE);
 static const ble_uuid128_t s_pos_uuid = BLE_UUID128_INIT(NAV_CHR_POSITION_UUID_LE);
 static const ble_uuid128_t s_cmd_uuid = BLE_UUID128_INIT(NAV_CHR_CMD_UUID_LE);
@@ -181,6 +221,8 @@ static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
 static const ble_uuid128_t s_nav_state_uuid = BLE_UUID128_INIT(NAV_CHR_STATE_UUID_LE);
 static const ble_uuid128_t s_media_info_uuid = BLE_UUID128_INIT(NAV_CHR_MEDIA_INFO_UUID_LE);
 static const ble_uuid128_t s_media_cmd_uuid = BLE_UUID128_INIT(NAV_CHR_MEDIA_CMD_UUID_LE);
+static const ble_uuid128_t s_call_info_uuid = BLE_UUID128_INIT(NAV_CHR_CALL_INFO_UUID_LE);
+static const ble_uuid128_t s_call_cmd_uuid = BLE_UUID128_INIT(NAV_CHR_CALL_CMD_UUID_LE);
 
 static const struct ble_gatt_svc_def s_svcs[] = {
     {
@@ -218,6 +260,17 @@ static const struct ble_gatt_svc_def s_svcs[] = {
                 .uuid = &s_nav_state_uuid.u,
                 .access_cb = chr_nav_state,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &s_call_info_uuid.u,
+                .access_cb = chr_call_info,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &s_call_cmd_uuid.u,
+                .access_cb = chr_call_cmd,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &s_call_cmd_h,
             },
             {0},
         },
@@ -269,11 +322,16 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
             s_media_sub = ev->subscribe.cur_notify;
             DBG("media cmd subscribe=%d", s_media_sub);
         }
+        if (ev->subscribe.attr_handle == s_call_cmd_h) {
+            s_call_sub = ev->subscribe.cur_notify;
+            DBG("call cmd subscribe=%d", s_call_sub);
+        }
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         DBG("disconnect reason=0x%x", ev->disconnect.reason);
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_media_sub = false;
+        s_call_sub = false;
         if (s_cbs.on_link) s_cbs.on_link(false);
         advertise();
         return 0;
@@ -388,7 +446,7 @@ static int purge_rpa_recs(const ble_addr_t *incoming)
             }
         }
     }
-    if (deleted) DBG("purged %d stale RPA records", deleted);
+    if (deleted) { DBG("purged %d stale RPA records", deleted); }
     return deleted;
 }
 
@@ -468,6 +526,17 @@ static void mcmd_ev_cb(struct ble_npl_event *ev)
     }
 }
 
+static void ccmd_ev_cb(struct ble_npl_event *ev)
+{
+    (void)ev;
+    uint8_t c;
+    while (xQueueReceive(s_ccmd_q, &c, 0) == pdTRUE) {
+        if (s_conn == BLE_HS_CONN_HANDLE_NONE || !s_call_sub) continue;
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(&c, 1);
+        if (om) ble_gatts_notify_custom(s_conn, s_call_cmd_h, om);
+    }
+}
+
 static void host_task(void *arg)
 {
     (void)arg;
@@ -506,7 +575,9 @@ void nav_ble_start(const nav_ble_cbs_t *cbs, const char *device_name)
     ble_npl_event_init(&s_forget_ev, forget_ev_cb, NULL);
     ble_npl_event_init(&s_disc_ev, disc_ev_cb, NULL);
     ble_npl_event_init(&s_mcmd_ev, mcmd_ev_cb, NULL);
+    ble_npl_event_init(&s_ccmd_ev, ccmd_ev_cb, NULL);
     s_mcmd_q = xQueueCreate(8, 2);
+    s_ccmd_q = xQueueCreate(8, 1);
     nimble_port_freertos_init(host_task);
 }
 
@@ -545,4 +616,15 @@ void nav_ble_media_cmd(uint8_t cmd, uint8_t arg)
 bool nav_ble_media_ready(void)
 {
     return s_conn != BLE_HS_CONN_HANDLE_NONE && s_media_sub;
+}
+
+void nav_ble_call_cmd(uint8_t cmd)
+{
+    if (!s_ccmd_q || xQueueSend(s_ccmd_q, &cmd, 0) != pdTRUE) return;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_ccmd_ev);
+}
+
+bool nav_ble_call_ready(void)
+{
+    return s_conn != BLE_HS_CONN_HANDLE_NONE && s_call_sub;
 }

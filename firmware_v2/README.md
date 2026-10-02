@@ -60,6 +60,7 @@ then released) → GT911 → SD (reuses GPIO1/2) → tiles → LVGL → BLE → 
 | `map_view.c` | Map blit, marker (glides between fixes, heading cone when moving), drag/pinch, overlays |
 | `ui_pair.c` | QR pairing screen (LVGL `lv_qrcode`) |
 | `media_view.c` | Phone media page: round art, progress ring, volume arc, transport |
+| `call_view.c` | Incoming-call page: caller name/number, answer / reject / dismiss |
 | `media_art.c` | Album art: BLE chunk reassembly → JPEG decode (`esp_jpeg`, ROM TJpgDec) → round mask → double buffer, in its own task |
 | `ui_common.c` | Shared round button |
 | `settings.c` | NVS, cached in RAM (same keys as v1) |
@@ -103,6 +104,36 @@ BLE extension (existing UUIDs unchanged, mirrored in `BleManager.kt` / `MediaBri
 - **GATT cache:** the device sends Service Changed on every boot, so bonded phones re-read the characteristic table after firmware updates. As a fallback, the app clears Android's GATT cache (`refresh()`) once if the media characteristics are missing.
 - **App requirement:** Notification access, needed by Android to read other apps' media sessions. The *Enable media controls* button opens the setting.
 - **Art sources:** metadata bitmap, `content://` URIs, or `https://` URLs. Media3-based players publish the URL first and the bitmap later; each new source is tried until one works.
+
+## Incoming calls
+
+When the phone rings, a full-page caller screen takes over: name, number, and
+three buttons — **Answer** (green), **Reject** (red) and **Dismiss** (neutral,
+centre). Dismiss only closes the page on the device; the call keeps ringing on
+the phone. The page takes over the map or the media page and returns there when
+it closes; it never interrupts pairing. It also closes by itself when the phone
+reports the call is no longer ringing (answered, rejected or missed), or when
+the link drops.
+
+BLE extension (existing UUIDs unchanged, mirrored in `BleManager.kt` /
+`CallBridge.kt`):
+
+| Characteristic | UUID | Direction | Payload |
+| --- | --- | --- | --- |
+| CALL_INFO | `3f9a2b41-6c7d-4e58-9a1b-2d4e6f8a0c13` | phone → device, write-no-rsp | `0x01` RING: name, `0x00`, number (UTF-8; either may be empty). `0x02` END: ringing stopped. |
+| CALL_CMD | `8e1c7d35-2b4a-4f60-9c3e-5a7b1d2e4f68` | device → phone, notify | `1` answer, `2` reject |
+
+- The phone detects ringing with `PhoneStateListener`. It is deprecated since
+  API 31 but remains the only public API that hands a normal app the incoming
+  number: `TelephonyCallback` omits it, and `CallScreeningService` needs the
+  call-screening role.
+- Answer/reject use `TelecomManager.acceptRingingCall()` / `endCall()`.
+- Permissions: `READ_PHONE_STATE` (state), `READ_CALL_LOG` (number),
+  `READ_CONTACTS` (name), `ANSWER_PHONE_CALLS` (answer/reject). Missing
+  permissions degrade to an empty name/number instead of hiding the call;
+  reject needs API 28+. The app's *Enable call controls* button requests them.
+- The ring command is best-effort: some OEM dialers may refuse
+  `acceptRingingCall`/`endCall` for a non-default app. Dismiss still works.
 
 ## Map theme
 

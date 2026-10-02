@@ -124,6 +124,14 @@ class MainActivity : AppCompatActivity() {
             // Notification access; Android has no runtime prompt for it.
             startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         }
+        b.btnCalls.setOnClickListener {
+            val missing = CallBridge.PERMISSIONS.filter { !hasPerm(it) }
+            if (missing.isNotEmpty()) {
+                ActivityCompat.requestPermissions(this, missing.toTypedArray(), 42)
+            } else {
+                toast("Call controls enabled")
+            }
+        }
         b.serviceToggle.setOnCheckedChangeListener { _, on ->
             if (on) {
                 Prefs.setServiceEnabled(this, true)
@@ -194,10 +202,15 @@ class MainActivity : AppCompatActivity() {
         b.btnSleep.isEnabled = bond != null && st == NavService.CONNECTED
         val media = MediaListenerService.hasAccess(this)
         b.btnMedia.text = if (media) "Media controls: enabled" else "Enable media controls"
+        val calls = CallBridge.PERMISSIONS.all { hasPerm(it) }
+        b.btnCalls.text = if (calls) "Call controls: enabled" else "Enable call controls"
     }
 
     private fun hasCam() = ActivityCompat.checkSelfPermission(
         this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasPerm(p: String) = ActivityCompat.checkSelfPermission(
+        this, p) == PackageManager.PERMISSION_GRANTED
 
     private fun requestPerms() {
         val need = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -209,9 +222,8 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             need += Manifest.permission.POST_NOTIFICATIONS
         }
-        val missing = need.filter {
-            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
+        need += CallBridge.PERMISSIONS
+        val missing = need.filter { !hasPerm(it) }
         if (missing.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), 41)
         }

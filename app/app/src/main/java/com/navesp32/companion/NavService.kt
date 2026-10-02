@@ -76,6 +76,7 @@ class NavService : Service() {
     private var media: MediaBridge? = null
     private var nav: NavBridge? = null
     private var osmand: OsmAndLink? = null
+    private var call: CallBridge? = null
     private var connected = false
     private val main = Handler(Looper.getMainLooper())
 
@@ -98,6 +99,7 @@ class NavService : Service() {
                 BluetoothAdapter.STATE_TURNING_OFF -> {
                     Log.i(TAG, "bluetooth turning off")
                     loc?.stop()
+                    call?.stop()
                     ble?.disconnect()
                 }
                 BluetoothAdapter.STATE_ON -> {
@@ -156,6 +158,12 @@ class NavService : Service() {
             }
             override fun mediaLinkReady() = ble?.mediaReady == true
         })
+        call = CallBridge(this, object : CallBridge.Out {
+            override fun callWrite(data: ByteArray, tag: String?) {
+                ble?.writeCall(data, tag)
+            }
+            override fun callLinkReady() = ble?.callReady == true
+        })
     }
 
     override fun onDestroy() {
@@ -168,6 +176,7 @@ class NavService : Service() {
         loc?.stop()
         media?.stop()
         osmand?.stop()
+        call?.stop()
         ble?.disconnect()
         super.onDestroy()
     }
@@ -181,6 +190,7 @@ class NavService : Service() {
                 loc?.stop()
                 media?.stop()
                 osmand?.stop()
+                call?.stop()
                 ble?.disconnect()
                 setState(OFFLINE)
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -194,6 +204,7 @@ class NavService : Service() {
                 Prefs.clearBond(this)
                 loc?.stop()
                 media?.stop()
+                call?.stop()
                 main.postDelayed({
                     ble?.removeBond()
                     ble?.disconnect()
@@ -217,6 +228,7 @@ class NavService : Service() {
                 setState(ASLEEP)
                 ble?.writeCmd(byteArrayOf(BleManager.CMD_SLEEP))
                 loc?.stop()
+                call?.stop()
                 return START_STICKY
             }
             ACTION_THEME -> {
@@ -257,6 +269,7 @@ class NavService : Service() {
                         // stop polling OsmAnd while the board cannot use it.
                         nav?.reset()
                         osmand?.stop()
+                        call?.stop()
                     }
                 }
 
@@ -284,6 +297,14 @@ class NavService : Service() {
 
                 override fun onMediaCmd(cmd: ByteArray) {
                     media?.handle(cmd)
+                }
+
+                override fun onCallReady() {
+                    call?.start()
+                }
+
+                override fun onCallCmd(cmd: ByteArray) {
+                    call?.handle(cmd)
                 }
             })
         }

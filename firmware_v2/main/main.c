@@ -18,6 +18,7 @@
 
 #include "ble_service.h"
 #include "board.h"
+#include "call_view.h"
 #include "display.h"
 #include "lcd.h"
 #include "lvgl.h"
@@ -69,11 +70,22 @@ typedef struct {
 } nav_msg_t;
 static QueueHandle_t s_nav_q;    // nav state + street + destination (overwrite)
 
-typedef enum { SCREEN_NONE, SCREEN_PAIR, SCREEN_MAP, SCREEN_MEDIA } screen_t;
+// Incoming call. One overwrite-latest slot: a ring that is immediately
+// followed by an end must not leave a stale screen up.
+typedef struct {
+    bool ringing;
+    char name[NAV_CALL_TEXT_MAX + 1];
+    char number[NAV_CALL_TEXT_MAX + 1];
+} call_msg_t;
+static QueueHandle_t s_call_q;
+
+typedef enum { SCREEN_NONE, SCREEN_PAIR, SCREEN_MAP, SCREEN_MEDIA, SCREEN_CALL } screen_t;
 static screen_t s_screen = SCREEN_NONE;
 // Screen changes requested from inside LVGL events are applied by the GUI
 // loop: rebuilding the screen deletes the object whose event is running.
 static screen_t s_screen_req = SCREEN_NONE;
+// Where to return after the call page closes (map or media page).
+static screen_t s_screen_before_call = SCREEN_MAP;
 static bool s_connected;
 
 static uint8_t s_brightness_pending;
@@ -119,6 +131,20 @@ static void ble_on_media_text(const char *title, const char *artist)
     xQueueOverwrite(s_text_q, &m);
 }
 
+static void ble_on_call_ring(const char *name, const char *number)
+{
+    call_msg_t m = {.ringing = true};
+    snprintf(m.name, sizeof(m.name), "%s", name);
+    snprintf(m.number, sizeof(m.number), "%s", number);
+    xQueueOverwrite(s_call_q, &m);
+}
+
+static void ble_on_call_end(void)
+{
+    call_msg_t m = {.ringing = false};
+    xQueueOverwrite(s_call_q, &m);
+}
+
 static void ble_on_nav_state(const nav_state_t *st, const char *street)
 {
     static nav_msg_t m;
@@ -153,6 +179,33 @@ static void ble_on_link(bool up)
 
 static void browse_cb(lv_event_t *e);
 static void open_map(void);
+static void return_from_call(void);
+
+static void call_answer_cb(void)
+{
+#if CONFIG_NAV_DEBUG_BLE
+    ESP_LOGW(TAG, "call: answer");
+#endif
+    nav_ble_call_cmd(NAV_CCMD_ANSWER);
+    return_from_call();
+}
+
+static void call_reject_cb(void)
+{
+#if CONFIG_NAV_DEBUG_BLE
+    ESP_LOGW(TAG, "call: reject");
+#endif
+    nav_ble_call_cmd(NAV_CCMD_REJECT);
+    return_from_call();
+}
+
+static void call_dismiss_cb(void)
+{
+#if CONFIG_NAV_DEBUG_BLE
+    ESP_LOGW(TAG, "call: dismiss");
+#endif
+    return_from_call();
+}
 
 static void show_screen(screen_t which)
 {
@@ -161,18 +214,33 @@ static void show_screen(screen_t which)
     map_view_destroy();
     media_view_destroy();
     nav_view_destroy();
+    call_view_destroy();
     lv_obj_clean(scr);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     if (which == SCREEN_PAIR) {
         ui_pair_create(scr, browse_cb);
     } else if (which == SCREEN_MEDIA) {
         media_view_create(scr, open_map);
+    } else if (which == SCREEN_CALL) {
+        call_view_create(scr, call_answer_cb, call_reject_cb, call_dismiss_cb);
     } else {
         map_view_create(scr);
         map_view_set_link(s_connected, settings_paired());
         nav_view_init();  // banner reappears if navigation is already live
     }
+#if CONFIG_NAV_DEBUG_BLE
+    ESP_LOGW(TAG, "screen -> %d (connected=%d paired=%d)", (int)which, s_connected,
+             settings_paired());
+#endif
     s_screen = which;
+}
+
+// Dismiss the call page and go back where the user was: the map, or the media
+// page if the call interrupted it. Called from an LVGL click event, so the
+// screen swap itself is deferred to the GUI loop.
+static void return_from_call(void)
+{
+    s_screen_req = (s_screen_before_call == SCREEN_MEDIA) ? SCREEN_MEDIA : SCREEN_MAP;
 }
 
 static void open_map(void)
@@ -323,6 +391,12 @@ static void process_events(void)
             // and no destination.
             nav_view_clear();
             map_view_set_dest(false, 0, 0);
+            // A dropped link also ends any call UI: the phone can no longer
+            // update it, and the page must not linger.
+            call_view_clear();
+            if (s_screen == SCREEN_CALL || s_screen_req == SCREEN_CALL) {
+                return_from_call();
+            }
             break;
         case EV_CMD:
             handle_cmd(&ev);
@@ -352,6 +426,32 @@ static void process_events(void)
     nav_position_t p;
     if (xQueueReceive(s_pos_q, &p, 0) == pdTRUE && valid_fix(&p)) {
         map_view_set_fix(p.lat_e7, p.lon_e7, p.speed_cms, p.cog_cdeg);
+    }
+    call_msg_t cm;
+    if (xQueueReceive(s_call_q, &cm, 0) == pdTRUE) {
+        note_activity();
+        if (cm.ringing) {
+#if CONFIG_NAV_DEBUG_BLE
+            ESP_LOGW(TAG, "call ring: name='%s' number='%s' screen=%d", cm.name, cm.number,
+                     (int)s_screen);
+#endif
+            // Take over the map or media page; never interrupt pairing. A
+            // ring that arrives after the link dropped is stale: ignore it.
+            if (s_connected &&
+                (s_screen == SCREEN_MAP || s_screen == SCREEN_MEDIA ||
+                 s_screen == SCREEN_CALL)) {
+                call_view_set_caller(cm.name, cm.number);
+                if (s_screen != SCREEN_CALL) s_screen_before_call = s_screen;
+                s_screen_req = SCREEN_CALL;
+            }
+        } else {
+#if CONFIG_NAV_DEBUG_BLE
+            ESP_LOGW(TAG, "call end (screen=%d)", (int)s_screen);
+#endif
+            if (s_screen == SCREEN_CALL || s_screen_req == SCREEN_CALL) {
+                return_from_call();
+            }
+        }
     }
     if (s_brightness_dirty && now_ms() - s_brightness_changed_ms > BRIGHTNESS_SAVE_MS) {
         s_brightness_dirty = false;
@@ -590,6 +690,7 @@ void app_main(void)
     s_media_q = xQueueCreate(1, sizeof(nav_media_state_t));
     s_text_q = xQueueCreate(1, sizeof(text_msg_t));
     s_nav_q = xQueueCreate(1, sizeof(nav_msg_t));
+    s_call_q = xQueueCreate(1, sizeof(call_msg_t));
 
     show_screen(settings_paired() ? SCREEN_MAP : SCREEN_PAIR);
 
@@ -602,6 +703,8 @@ void app_main(void)
         .on_media_text = ble_on_media_text,
         .on_nav_state = ble_on_nav_state,
         .on_nav_dest = ble_on_nav_dest,
+        .on_call_ring = ble_on_call_ring,
+        .on_call_end = ble_on_call_end,
     };
     nav_ble_start(&cbs, settings_device_name());
 
