@@ -21,6 +21,10 @@ void nav_view_update(const nav_state_t *st, const char *street);
 // the status pill for the banner.
 bool nav_view_active(void);
 
+// Remaining time to arrival in seconds, from the last instruction. Only
+// meaningful while nav_view_active(); 0 otherwise.
+uint16_t nav_view_remaining_s(void);
+
 // Drop the current instruction (link lost / phone gone). Hides immediately
 // instead of waiting for the staleness timer.
 void nav_view_clear(void);

@@ -79,6 +79,7 @@ static lv_obj_t *s_map, *s_pill, *s_pill_dot, *s_pill_lbl;
 static lv_obj_t *s_btn_in, *s_btn_out, *s_btn_center, *s_toast;
 static uint32_t s_toast_until;
 static int s_status_key = -1;
+static int s_status_eta_min = -1;   // last ETA minutes drawn (nav pill)
 static void (*s_reset_cb)(void);
 static void (*s_media_cb)(void);
 static void (*s_sleep_cb)(void);
@@ -611,6 +612,10 @@ static void update_status(void)
         key = 0, txt = "Not paired", col = COL_GRAY;
     } else if (!s_connected) {
         key = 1, txt = "Searching for phone", col = COL_AMBER;
+    } else if (nav_view_active()) {
+        // Navigation owns the pill: ETA from the remaining time the phone
+        // already sends (NAV_STATE.remaining_s). Back to "Live" when it ends.
+        key = 5, txt = NULL, col = COL_LIVE;
     } else if (live) {
         key = 2, txt = "Live", col = COL_GREEN;
     } else if (s_fix_live) {
@@ -618,8 +623,22 @@ static void update_status(void)
     } else {
         key = 4, txt = "Waiting for GPS", col = COL_AMBER;
     }
-    if (key == s_status_key) return;
+
+    char eta[24];
+    int eta_min = -1;
+    if (key == 5) {
+        uint16_t rs = nav_view_remaining_s();
+        // Round up: "1m" until the last minute, then "<1m".
+        eta_min = (rs + 30) / 60;
+        if (rs < 60) snprintf(eta, sizeof(eta), "ETA <1m");
+        else snprintf(eta, sizeof(eta), "ETA %dm", eta_min);
+        txt = eta;
+    }
+
+    // Re-render when the base state changes, or when the ETA minute changes.
+    if (key == s_status_key && eta_min == s_status_eta_min) return;
     s_status_key = key;
+    s_status_eta_min = eta_min;
     lv_label_set_text(s_pill_lbl, txt);
     lv_obj_set_style_bg_color(s_pill_dot, lv_color_hex(col), 0);
 }
@@ -933,6 +952,7 @@ void map_view_create(lv_obj_t *parent)
     lv_obj_set_style_text_font(s_pill_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_pill_lbl, lv_color_white(), 0);
     s_status_key = -1;
+    s_status_eta_min = -1;
     update_status();
 
     const lv_font_t *f = &lv_font_montserrat_28;
@@ -1095,6 +1115,10 @@ void map_view_tick(void)
         s_was_nav = nav_on;
         update_buttons();
     }
+    // Cheap: update_status() early-returns unless the state or ETA minute
+    // changed. Needed here so the ETA counts down while everything else is
+    // steady.
+    update_status();
 
     bool live = fix_is_live();
     if (live != s_was_live) {

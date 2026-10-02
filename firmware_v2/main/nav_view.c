@@ -369,6 +369,11 @@ bool nav_view_active(void)
     return s_have && (s_st.flags & NAV_F_ACTIVE) && (now_ms() - s_last_ms) < STALE_MS;
 }
 
+uint16_t nav_view_remaining_s(void)
+{
+    return nav_view_active() ? s_st.remaining_s : 0;
+}
+
 void nav_view_clear(void)
 {
     s_have = false;
