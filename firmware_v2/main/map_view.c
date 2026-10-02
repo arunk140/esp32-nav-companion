@@ -248,8 +248,8 @@ static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
 
 #define DEST_R 7
 
-// Destination: a plain filled orange dot with a dark ring so it reads on any
-// map colour.
+// Destination: a plain filled orange dot. Ring follows the theme so it reads on
+// both a dark and a light map.
 static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
 {
     lv_draw_rect_dsc_t r;
@@ -257,7 +257,7 @@ static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
     r.radius = LV_RADIUS_CIRCLE;
     r.bg_color = lv_color_hex(COL_DEST);
     r.bg_opa = LV_OPA_COVER;
-    r.border_color = lv_color_hex(0x000000);
+    r.border_color = lv_color_hex(tiles_dark() ? 0x000000 : 0xFFFFFF);
     r.border_width = 2;
     r.border_opa = LV_OPA_60;
     lv_area_t disc = {x - DEST_R, y - DEST_R, x + DEST_R, y + DEST_R};
@@ -269,11 +269,15 @@ static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
 //   LINK_STEP    px the pattern advances per rendered frame (uniform, so motion
 //                is smooth regardless of when a frame happens to draw)
 //   LINK_ANIM_MS how often we ask for a frame; period/step frames = one cycle
-#define LINK_DASH 9
-#define LINK_GAP 7
-#define LINK_W 5
+#define LINK_DASH 5
+#define LINK_GAP 6
+#define LINK_W 3
 #define LINK_STEP 1
 #define LINK_ANIM_MS 220   // ~4.5 fps: calm march, one cycle in ~3.5 s
+
+// White on a dark map, light grey on a light one.
+#define LINK_COL_DARK 0xFFFFFF
+#define LINK_COL_LIGHT 0xB0B4B8
 
 static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
                            int32_t x1, int32_t y1, int32_t phase)
@@ -286,7 +290,7 @@ static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
     lv_draw_rect_dsc_t d;
     lv_draw_rect_dsc_init(&d);
     d.radius = LINK_W;              // capsule caps
-    d.bg_color = lv_color_white();
+    d.bg_color = lv_color_hex(tiles_dark() ? LINK_COL_DARK : LINK_COL_LIGHT);
     d.bg_opa = LV_OPA_70;
     d.border_opa = LV_OPA_TRANSP;
 
