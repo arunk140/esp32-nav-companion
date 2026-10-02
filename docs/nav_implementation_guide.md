@@ -328,7 +328,14 @@ W write dropped: 7c3d1f92-… not in service (12 B)
   `logcat -d` with tag filters lost the very lines being investigated (buffer
   rotation). Always capture to a file first, filter afterwards.
 - **Serial capture** — `mon.py` in `/tmp/opencode`, plus `addr2line` for panics.
-- **UUID byte checker** — read-only, compares every `_UUID` to its `_UUID_LE`.
+- **UUID byte checker** — `tools/check_uuids.py` (read-only) compares every
+  `_UUID` string to its `_UUID_LE` array; it reports, never rewrites (§6.2).
+- **Mock nav driver** — `tools/nav_mock.py` writes STATE/TEXT straight to the
+  characteristic over BLE (no OsmAnd, no phone): `icons`, `one`, `route`, `live`.
+  This is what finally exercised the §8 icons/paths on hardware.
+- **Offline icon preview** — `tools/preview_icons.py` mirrors `draw_icon` geometry
+  into `tmp/nav_icons_preview.png`, catching clipped/malformed shapes before a
+  flash cycle.
 
 ---
 
