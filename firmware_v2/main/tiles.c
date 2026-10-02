@@ -33,6 +33,7 @@ typedef struct {
     int8_t z;
     int32_t x, y;
     uint32_t last_used;
+    bool dark;  // theme the pixels were written with
     uint8_t *px;
     lv_image_dsc_t dsc;
 } slot_t;
@@ -48,6 +49,7 @@ typedef struct {
     int16_t slot;
     bool ok;
     bool skipped;
+    bool dark;  // theme the pixels were written with
     uint32_t ms;
 } done_t;
 
@@ -55,6 +57,7 @@ static slot_t s_slots[NSLOTS];
 static QueueHandle_t s_req_q, s_done_q;
 static uint8_t *s_chunk;
 static volatile int s_active_zoom;
+static volatile bool s_dark;
 static uint32_t s_frame = 1;
 static int s_zmin, s_zmax;
 static int s_loading;
@@ -113,6 +116,37 @@ static bool read_tile(int z, int x, int y, uint8_t *dst)
     return ok;
 }
 
+// Hue-preserving dark map: lightness flips, and each channel keeps 60% of
+// its offset from the old lightness, so roads and water stay recognisable
+// instead of turning into a photo negative. Channel values are expanded by
+// bit replication (no division); 0.6 is one multiply.
+#define CHROMA_SHIFT 11
+#define CHROMA_MUL 1233  // 0.6016
+
+static inline uint8_t clamp8(int32_t v)
+{
+    return v < 0 ? 0 : (v > 255 ? 255 : (uint8_t)v);
+}
+
+static void apply_dark(uint8_t *px)
+{
+    uint16_t *p = (uint16_t *)px;
+    for (int i = 0; i < TILE_PX * TILE_PX; i++) {
+        uint32_t c = p[i];
+        uint32_t r5 = (c >> 11) & 0x1F, g6 = (c >> 5) & 0x3F, b5 = c & 0x1F;
+        uint32_t r = (r5 << 3) | (r5 >> 2);
+        uint32_t g = (g6 << 2) | (g6 >> 4);
+        uint32_t b = (b5 << 3) | (b5 >> 2);
+        uint32_t l = ((r + g + b) * 85) >> 8;  // mean, 0..255
+        uint32_t inv = 255 - l;
+        int32_t r2 = (int32_t)inv + ((((int32_t)r - (int32_t)l) * CHROMA_MUL) >> CHROMA_SHIFT);
+        int32_t g2 = (int32_t)inv + ((((int32_t)g - (int32_t)l) * CHROMA_MUL) >> CHROMA_SHIFT);
+        int32_t b2 = (int32_t)inv + ((((int32_t)b - (int32_t)l) * CHROMA_MUL) >> CHROMA_SHIFT);
+        p[i] = ((uint32_t)clamp8(r2) >> 3) << 11 | ((uint32_t)clamp8(g2) >> 2) << 5 |
+               (clamp8(b2) >> 3);
+    }
+}
+
 static void loader_task(void *arg)
 {
     (void)arg;
@@ -125,6 +159,10 @@ static void loader_task(void *arg)
         } else {
             int64_t t0 = esp_timer_get_time();
             d.ok = read_tile(r.z, r.x, r.y, r.px);
+            // Theme is sampled here, not at enqueue time: a switch that
+            // lands while a tile is queued must still apply to it.
+            d.dark = s_dark;
+            if (d.ok && d.dark) apply_dark(r.px);
             d.ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
         }
         // Never blocks: at most NSLOTS requests are outstanding.
@@ -150,6 +188,9 @@ static void scan_zooms(void)
 
 void tiles_init(void)
 {
+#if CONFIG_NAV_DARK_MAP
+    s_dark = true;
+#endif
     scan_zooms();
     for (int i = 0; i < NMISS; i++) s_miss[i].z = -1;
     s_chunk = heap_caps_malloc(CHUNK, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -175,6 +216,26 @@ void tiles_init(void)
     if (s_chunk && sdcard_ok()) {
         xTaskCreatePinnedToCore(loader_task, "tile_ld", 4096, NULL, 3, NULL, 0);
     }
+}
+
+void tiles_set_dark(bool dark)
+{
+    if (dark == s_dark) return;
+    s_dark = dark;
+    for (int i = 0; i < NSLOTS; i++) {
+        slot_t *s = &s_slots[i];
+        // LOADING slots are left alone: the loader discards them if the
+        // theme moved on while it was reading.
+        if (s->state == S_READY || s->state == S_FREE) {
+            s->state = S_FREE;
+            s->z = -1;
+        }
+    }
+}
+
+bool tiles_dark(void)
+{
+    return s_dark;
 }
 
 int tiles_zoom_min(void)
@@ -246,6 +307,11 @@ const lv_image_dsc_t *tiles_get(int z, int x, int y, bool urgent, tile_state_t *
         return NULL;
     }
     slot_t *s = find(z, x, y);
+    if (s && s->state == S_READY && s->dark != s_dark) {
+        s->state = S_FREE;  // wrong theme: drop it, it will be re-read
+        s->z = -1;
+        s = NULL;
+    }
     if (s) {
         if (urgent) s->last_used = s_frame;
         if (s->state == S_READY) {
@@ -300,8 +366,14 @@ bool tiles_poll(void)
             s->z = -1;
             continue;
         }
-        if (d.ok) {
+        if (d.ok && d.dark != s_dark) {
+            // Switched mid-read: throw the result away rather than showing a
+            // tile in the old theme.
+            s->state = S_FREE;
+            s->z = -1;
+        } else if (d.ok) {
             s->state = S_READY;
+            s->dark = d.dark;
             s_loads++;
             s_load_ms_sum += d.ms;
             if (d.ms > s_load_ms_max) s_load_ms_max = d.ms;

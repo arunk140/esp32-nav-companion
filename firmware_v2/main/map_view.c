@@ -37,8 +37,10 @@
 #define TRIPLE_TAP_WINDOW_MS 1000
 #define TAP_MAX_MS 500
 
-#define COL_PENDING 0xF2EFE9
-#define COL_MISSING 0xD9DCE0
+#define COL_PENDING_L 0xF2EFE9
+#define COL_MISSING_L 0xD9DCE0
+#define COL_PENDING_D 0x2A2E33
+#define COL_MISSING_D 0x14181C
 #define COL_LIVE 0x1A73E8
 #define COL_STALE 0x8A8F96
 #define COL_GREEN 0x34A853
@@ -223,6 +225,15 @@ typedef struct {
 static int32_t s_f_ox, s_f_oy;
 static float s_f_rot;
 static int32_t s_r_rot;  // rotation of the last render, 0.1 deg units
+
+// Placeholder colour for tiles that are not drawable yet. Follows the theme
+// so a dark map isn't speckled with light blocks.
+static uint32_t fill_colour(tile_state_t st)
+{
+    bool dark = tiles_dark();
+    return dark ? (st == TILE_MISSING ? COL_MISSING_D : COL_PENDING_D)
+                : (st == TILE_MISSING ? COL_MISSING_L : COL_PENDING_L);
+}
 
 static void fill_rect(uint8_t *fb, uint32_t stride, int x0, int y0, int w, int h, uint16_t c)
 {
@@ -444,7 +455,7 @@ static void render_rotated(uint8_t *fb, uint32_t stride, float rot)
         const lv_image_dsc_t *img = tiles_get(s_zoom, v[i].tx, v[i].ty, true, &st);
         int gx = v[i].tx - gx0, gy = v[i].ty - gy0;
         g.t[gy][gx] = img ? (const uint16_t *)img->data : NULL;
-        g.fill[gy][gx] = lv_color_to_u16(lv_color_hex(st == TILE_MISSING ? COL_MISSING : COL_PENDING));
+        g.fill[gy][gx] = lv_color_to_u16(lv_color_hex(fill_colour(st)));
     }
 
     // Screen offset (px, py) from the centre maps to world offset R(rot)*(px, py).
@@ -529,8 +540,8 @@ static void render_start_cb(lv_event_t *e)
                 src += TILE_PX * 2;
             }
         } else {
-            uint32_t col = st == TILE_MISSING ? COL_MISSING : COL_PENDING;
-            fill_rect(fb, stride, x0, y0, x1 - x0, y1 - y0, lv_color_to_u16(lv_color_hex(col)));
+            fill_rect(fb, stride, x0, y0, x1 - x0, y1 - y0,
+                      lv_color_to_u16(lv_color_hex(fill_colour(st))));
         }
     }
 }

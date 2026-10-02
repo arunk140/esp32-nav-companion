@@ -22,6 +22,12 @@ typedef enum {
 
 void tiles_init(void);
 
+// Colour inversion, applied to each tile as the loader reads it, so drawing
+// costs nothing extra. Dark is hue-preserving: lightness flips and chroma
+// carries through (a photo negative would turn water orange).
+void tiles_set_dark(bool dark);
+bool tiles_dark(void);
+
 // Zoom levels found on the card; both 0 when the card has no tiles.
 int tiles_zoom_min(void);
 int tiles_zoom_max(void);
