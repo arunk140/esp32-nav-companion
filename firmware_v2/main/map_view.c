@@ -277,7 +277,7 @@ static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
 
 // White on a dark map, light grey on a light one.
 #define LINK_COL_DARK 0xFFFFFF
-#define LINK_COL_LIGHT 0xB0B4B8
+#define LINK_COL_LIGHT 0x8A9096
 
 static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
                            int32_t x1, int32_t y1, int32_t phase)
