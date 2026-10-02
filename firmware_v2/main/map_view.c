@@ -263,12 +263,14 @@ static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
     lv_draw_rect(layer, &r, &disc);
 }
 
-// Dotted line from the position marker to the destination. `phase` (0..dash)
-// shifts the dash start so the dots march toward the destination.
+// Dotted line from the position marker to the destination. `phase` (0..period)
+// shifts the dash start so the dots march toward the destination. The phase
+// advances at now_ms()/LINK_PHASE_DIV, so a bigger divisor marches more slowly.
 #define LINK_DASH 9
 #define LINK_GAP 7
 #define LINK_W 5
-#define LINK_ANIM_MS 100   // ~10 fps for the marching dots
+#define LINK_PHASE_DIV 6   // dots advance 1 px per 6 ms
+#define LINK_ANIM_MS 120   // ~8 fps is plenty for this
 
 static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
                            int32_t x1, int32_t y1, int32_t phase)
@@ -281,7 +283,7 @@ static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
     lv_draw_rect_dsc_t d;
     lv_draw_rect_dsc_init(&d);
     d.radius = LINK_W;              // capsule caps
-    d.bg_color = lv_color_hex(COL_DEST);
+    d.bg_color = lv_color_white();
     d.bg_opa = LV_OPA_70;
     d.border_opa = LV_OPA_TRANSP;
 
@@ -650,7 +652,7 @@ static void draw_cb(lv_event_t *e)
         int32_t dx, dy;
         world_screen(s_dnx, s_dny, s_f_ox, s_f_oy, s_f_rot, &dx, &dy);
         draw_dest_line(layer, sx, sy, dx, dy,
-                       (int32_t)(now_ms() % (LINK_DASH + LINK_GAP)));
+                       (int32_t)((now_ms() / LINK_PHASE_DIV) % (LINK_DASH + LINK_GAP)));
     }
     if (s_has_dest) {
         int32_t dx, dy;
