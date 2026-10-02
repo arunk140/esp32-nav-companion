@@ -7,8 +7,9 @@
 // Album art pipeline: BLE ART chunks -> reassembly -> JPEG decode -> round
 // mask -> double-buffered RGB565 image. Decoding runs in its own task.
 
-// Background colour outside the round art (must match the media page bg).
-#define MEDIA_ART_BG 0x101418
+// Background of the media page, and the colour the album art's corners are
+// masked toward. Independent of the map theme.
+#define MEDIA_ART_BG 0x000000
 
 void media_art_init(void);
 
