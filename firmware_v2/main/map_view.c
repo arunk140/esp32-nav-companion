@@ -180,10 +180,20 @@ static void invalidate(void)
 
 // ---------------------------------------------------------------- render
 
+// Marker geometry, one knob for the lot. Base sizes are in pixels; at 0.8
+// the dot is 13 px across with a 29 px halo.
+#define MARKER_SCALE 0.6f
+#define MARK_HALO_R (24.0f * MARKER_SCALE)
+#define MARK_DOT_R (11.0f * MARKER_SCALE)
+#define MARK_RING_W 1
+#define MARK_CONE_LEN (36.0f * MARKER_SCALE)
+#define MARK_CONE_W (15.0f * MARKER_SCALE)
+
 static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
 {
     bool live = fix_is_live();
     lv_color_t c = lv_color_hex(live ? COL_LIVE : COL_STALE);
+    int32_t hr = (int32_t)lroundf(MARK_HALO_R), dr = (int32_t)lroundf(MARK_DOT_R);
 
     if (live && s_moving) {
         float a = ((float)s_cog_cdeg / 100.0f - rot) * (float)M_PI / 180.0f;
@@ -191,12 +201,12 @@ static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
         lv_draw_triangle_dsc_init(&t);
         t.color = c;
         t.opa = LV_OPA_70;
-        t.p[0].x = x + sinf(a) * 36.0f;
-        t.p[0].y = y - cosf(a) * 36.0f;
-        t.p[1].x = x + sinf(a - 0.55f) * 15.0f;
-        t.p[1].y = y - cosf(a - 0.55f) * 15.0f;
-        t.p[2].x = x + sinf(a + 0.55f) * 15.0f;
-        t.p[2].y = y - cosf(a + 0.55f) * 15.0f;
+        t.p[0].x = x + sinf(a) * MARK_CONE_LEN;
+        t.p[0].y = y - cosf(a) * MARK_CONE_LEN;
+        t.p[1].x = x + sinf(a - 0.55f) * MARK_CONE_W;
+        t.p[1].y = y - cosf(a - 0.55f) * MARK_CONE_W;
+        t.p[2].x = x + sinf(a + 0.55f) * MARK_CONE_W;
+        t.p[2].y = y - cosf(a + 0.55f) * MARK_CONE_W;
         lv_draw_triangle(layer, &t);
     }
 
@@ -205,14 +215,14 @@ static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
     r.radius = LV_RADIUS_CIRCLE;
     r.bg_color = c;
     r.bg_opa = LV_OPA_20;
-    lv_area_t halo = {x - 24, y - 24, x + 24, y + 24};
+    lv_area_t halo = {x - hr, y - hr, x + hr, y + hr};
     lv_draw_rect(layer, &r, &halo);
 
     r.bg_opa = LV_OPA_COVER;
     r.border_color = lv_color_white();
-    r.border_width = 3;
+    r.border_width = MARK_RING_W;
     r.border_opa = LV_OPA_COVER;
-    lv_area_t dot = {x - 11, y - 11, x + 11, y + 11};
+    lv_area_t dot = {x - dr, y - dr, x + dr, y + dr};
     lv_draw_rect(layer, &r, &dot);
 }
 
