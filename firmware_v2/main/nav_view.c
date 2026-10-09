@@ -227,6 +227,31 @@ static void draw_icon(lv_layer_t *l, int cx, int cy, uint8_t type)
 
 // ---------------------------------------------------------------- banner
 
+// The line under the distance. The phone sends the road being entered, or its
+// own instruction when the road has no name. If it sends nothing at all, say
+// what the maneuver is: that is always true, where "unnamed road" was noise.
+static const char *street_line(void)
+{
+    static const char *const words[NAV_MANEUVER_MAX + 1] = {
+        [NAV_NONE] = "",
+        [NAV_CONTINUE] = "Continue",
+        [NAV_SLIGHT_LEFT] = "Slight left",
+        [NAV_LEFT] = "Turn left",
+        [NAV_SHARP_LEFT] = "Sharp left",
+        [NAV_SLIGHT_RIGHT] = "Slight right",
+        [NAV_RIGHT] = "Turn right",
+        [NAV_SHARP_RIGHT] = "Sharp right",
+        [NAV_KEEP_LEFT] = "Keep left",
+        [NAV_KEEP_RIGHT] = "Keep right",
+        [NAV_UTURN] = "Make a U-turn",
+        [NAV_ROUNDABOUT] = "At the roundabout",
+        [NAV_OFF_ROUTE] = "Finding a new route",
+        [NAV_ARRIVE] = "Your destination",
+    };
+    if (s_street[0]) return s_street;
+    return s_st.maneuver <= NAV_MANEUVER_MAX ? words[s_st.maneuver] : "";
+}
+
 static void refresh(void)
 {
     if (!s_banner) return;
@@ -435,9 +460,8 @@ void nav_view_update(const nav_state_t *st, const char *street)
         }
         while (o > 0 && s_street[o - 1] == ' ') o--;
         s_street[o] = '\0';
-        if (!o) snprintf(s_street, sizeof(s_street), "unnamed road");
     }
-    if (s_lbl_street) lv_label_set_text(s_lbl_street, s_street);
+    if (s_lbl_street) lv_label_set_text(s_lbl_street, street_line());
     // Always re-evaluate visibility: a stop STATE carries no street, and
     // refresh() is what hides the banner (and applies staleness). Calling it
     // only from the street branch left the banner up forever after a stop.
