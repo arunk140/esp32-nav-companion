@@ -64,7 +64,10 @@ static void format_dist(char *out, size_t cap, uint16_t m)
 // Authored in a 100x100 box centred on (cx, cy), then scaled by ICON_PCT so a
 // single knob shrinks every icon without touching the text.
 #define ICON_PCT 90
-static int ip(int v) { return (v * ICON_PCT) / 100; }
+// The same icons at this scale preview the turn after next ("then").
+#define THEN_PCT 44
+static int s_icon_pct = ICON_PCT;
+static int ip(int v) { return (v * s_icon_pct) / 100; }
 
 // A stroke is a thick line with rounded caps; heads are triangles. Lines must
 // use lv_draw_line (true rotated capsules) - axis-aligned rects only work for
@@ -252,6 +255,21 @@ static const char *street_line(void)
     return s_st.maneuver <= NAV_MANEUVER_MAX ? words[s_st.maneuver] : "";
 }
 
+// Two turns close together: the one after next is previewed beside the next,
+// so a quick left-then-right is seen as one move. Only when the second follows
+// within THEN_MAX_M of the first; further apart, it gets its own turn in time.
+#define THEN_MAX_M 250
+#define THEN_CX (BANNER_W - 34)
+#define THEN_CY 52
+#define THEN_ROOM 56   // width given up by the text beside it
+
+static bool then_shown(void)
+{
+    return s_st.maneuver != NAV_ARRIVE && s_st.maneuver != NAV_OFF_ROUTE &&
+           s_st.after_maneuver != NAV_NONE && s_st.after_maneuver <= NAV_MANEUVER_MAX &&
+           s_st.after_dist_m <= THEN_MAX_M;
+}
+
 static void refresh(void)
 {
     if (!s_banner) return;
@@ -275,7 +293,17 @@ static void refresh(void)
     if (rm >= 10000) snprintf(left, sizeof(left), "%.1f km left", rm / 1000.0f);
     else snprintf(left, sizeof(left), "%u m left", (unsigned)rm);
     lv_label_set_text(s_lbl_left, left);
-    lv_obj_set_hidden(s_lbl_left, s_minimal);
+    // The preview takes the right-hand end of the banner: the text narrows to
+    // make room, and the distance-left figure (which lives there) steps aside.
+    bool then = then_shown();
+    lv_obj_set_hidden(s_lbl_left, s_minimal || then);
+    static int then_was = -1;
+    if (then_was != (int)then || lv_obj_get_width(s_lbl_street) != TEXT_W - (then ? THEN_ROOM : 0)) {
+        then_was = then;
+        lv_obj_set_width(s_lbl_street, TEXT_W - (then ? THEN_ROOM : 0));
+        lv_obj_set_width(s_lbl_dist, TEXT_W - (then ? THEN_ROOM : 0));
+        lv_obj_invalidate(s_banner);
+    }
 }
 
 // Normal: a dark box, street over distance. Minimal: no box, a large distance
@@ -356,6 +384,20 @@ static void banner_draw_cb(lv_event_t *e)
     lv_area_t c;
     lv_obj_get_coords(obj, &c);
     draw_icon(layer, c.x1 + ICON_CX, c.y1 + ICON_CY, s_st.maneuver);
+    if (then_shown()) {
+        // "then" over a small copy of the following turn's icon, at the right.
+        lv_draw_label_dsc_t d;
+        lv_draw_label_dsc_init(&d);
+        d.text = "then";
+        d.font = &lv_font_montserrat_14;
+        d.color = lv_color_hex(COL_DIST);
+        d.align = LV_TEXT_ALIGN_CENTER;
+        lv_area_t a = {c.x1 + THEN_CX - 30, c.y1 + 6, c.x1 + THEN_CX + 30, c.y1 + 24};
+        lv_draw_label(layer, &d, &a);
+        s_icon_pct = THEN_PCT;
+        draw_icon(layer, c.x1 + THEN_CX, c.y1 + THEN_CY, s_st.after_maneuver);
+        s_icon_pct = ICON_PCT;
+    }
 }
 
 static void banner_click_cb(lv_event_t *e)
