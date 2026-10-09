@@ -1045,8 +1045,9 @@ static void clear_black(uint8_t *fb, uint32_t stride)
 // whole-world coordinate would be a couple of pixels out at this zoom.
 #define ROADS_MAX_PTS 1600
 #define ROADS_MAX_LINES 240
-#define COL_ROAD_MINOR 0x2B2F34
-#define COL_ROAD_MAJOR 0x474C53
+// At full strength, beside the route. They fade to black away from it.
+#define COL_ROAD_MINOR 0x4A5057
+#define COL_ROAD_MAJOR 0x6E757E
 
 typedef struct {
     uint16_t first, n;
@@ -1130,10 +1131,120 @@ void map_view_roads_chunk(const uint8_t *data, size_t len)
     }
 }
 
-// One thick line straight into the frame buffer. Not anti-aliased: these are
-// dim background lines, and there can be a few hundred of them per frame,
-// which LVGL's line drawing is far too slow for.
-static void fb_line(uint8_t *fb, uint32_t stride, int x0, int y0, int x1, int y1, uint16_t col, int w)
+// ---- fading the streets away from the route ----
+// A coarse map of how far each part of the screen is from the route ahead (or
+// from the marker when there is no route): the screen in ROAD_CELL px cells,
+// each holding a distance in half-cells. Streets are drawn at full strength
+// next to the route and fade to nothing further out, so the route stays the
+// only bright line and its surroundings read as context.
+#define ROAD_CELL 8
+#define ROAD_GRID (BOARD_LCD_W / ROAD_CELL)
+#define ROAD_FADE_NEAR_PX 28    // full strength up to here
+#define ROAD_FADE_FAR_PX 200    // invisible from here on
+#define ROAD_SHADES 16
+static uint8_t s_road_dist[ROAD_GRID * ROAD_GRID];
+static uint8_t s_road_shade[256];  // distance value -> shade, 0 = not drawn
+
+static inline void road_seed(int x, int y)
+{
+    if (x >= 0 && x < BOARD_LCD_W && y >= 0 && y < BOARD_LCD_H) {
+        s_road_dist[(y / ROAD_CELL) * ROAD_GRID + x / ROAD_CELL] = 0;
+    }
+}
+
+// World point -> screen for the frame being painted, same as draw_roads uses.
+static inline void frame_screen(double nx, double ny, double w, float c, float sn, int *x, int *y)
+{
+    float wx = (float)((nx - s_cx) * w), wy = (float)((ny - s_cy) * w);
+    *x = (int)lroundf(239.5f + wx * c + wy * sn);
+    *y = (int)lroundf(239.5f - wx * sn + wy * c);
+}
+
+static void road_fade_build(double w, float c, float sn)
+{
+    memset(s_road_dist, 255, sizeof(s_road_dist));
+    int x, y;
+    if (s_has_fix) {
+        frame_screen(s_mx, s_my, w, c, sn, &x, &y);
+        road_seed(x, y);
+    }
+    if (s_route_active && s_route_n >= 2) {
+        // The route still ahead, from the segment the marker is on.
+        int from = s_route_seg > 0 && s_route_seg < s_route_n - 1 ? s_route_seg : 0;
+        int px = 0, py = 0;
+        for (int i = from; i < s_route_n; i++) {
+            frame_screen(lon_to_nx(s_route_lon[i] / 1e7), lat_to_ny(s_route_lat[i] / 1e7), w, c, sn, &x, &y);
+            if (i > from) {
+                int minx = px < x ? px : x, maxx = px > x ? px : x;
+                int miny = py < y ? py : y, maxy = py > y ? py : y;
+                if (maxx >= 0 && minx < BOARD_LCD_W && maxy >= 0 && miny < BOARD_LCD_H &&
+                    maxx - minx < 4000 && maxy - miny < 4000) {
+                    int dx = x - px, dy = y - py;
+                    int steps = (abs(dx) > abs(dy) ? abs(dx) : abs(dy)) / (ROAD_CELL / 2) + 1;
+                    for (int k = 0; k <= steps; k++) road_seed(px + dx * k / steps, py + dy * k / steps);
+                }
+            }
+            px = x, py = y;
+        }
+    }
+    // Two-pass chamfer distance: 2 per cell straight, 3 diagonally.
+    uint8_t *d = s_road_dist;
+    for (int gy = 0; gy < ROAD_GRID; gy++) {
+        for (int gx = 0; gx < ROAD_GRID; gx++) {
+            int v = d[gy * ROAD_GRID + gx];
+            if (gx > 0 && d[gy * ROAD_GRID + gx - 1] + 2 < v) v = d[gy * ROAD_GRID + gx - 1] + 2;
+            if (gy > 0) {
+                const uint8_t *u = d + (gy - 1) * ROAD_GRID;
+                if (u[gx] + 2 < v) v = u[gx] + 2;
+                if (gx > 0 && u[gx - 1] + 3 < v) v = u[gx - 1] + 3;
+                if (gx < ROAD_GRID - 1 && u[gx + 1] + 3 < v) v = u[gx + 1] + 3;
+            }
+            d[gy * ROAD_GRID + gx] = (uint8_t)v;
+        }
+    }
+    for (int gy = ROAD_GRID - 1; gy >= 0; gy--) {
+        for (int gx = ROAD_GRID - 1; gx >= 0; gx--) {
+            int v = d[gy * ROAD_GRID + gx];
+            if (gx < ROAD_GRID - 1 && d[gy * ROAD_GRID + gx + 1] + 2 < v) v = d[gy * ROAD_GRID + gx + 1] + 2;
+            if (gy < ROAD_GRID - 1) {
+                const uint8_t *u = d + (gy + 1) * ROAD_GRID;
+                if (u[gx] + 2 < v) v = u[gx] + 2;
+                if (gx > 0 && u[gx - 1] + 3 < v) v = u[gx - 1] + 3;
+                if (gx < ROAD_GRID - 1 && u[gx + 1] + 3 < v) v = u[gx + 1] + 3;
+            }
+            d[gy * ROAD_GRID + gx] = (uint8_t)v;
+        }
+    }
+    // Distance value (half-cells) -> shade. Built once.
+    static bool have_shade;
+    if (!have_shade) {
+        have_shade = true;
+        for (int v = 0; v < 256; v++) {
+            int px_d = v * (ROAD_CELL / 2);
+            int sh = px_d <= ROAD_FADE_NEAR_PX ? ROAD_SHADES - 1
+                     : px_d >= ROAD_FADE_FAR_PX ? 0
+                     : (ROAD_FADE_FAR_PX - px_d) * (ROAD_SHADES - 1) / (ROAD_FADE_FAR_PX - ROAD_FADE_NEAR_PX);
+            s_road_shade[v] = (uint8_t)sh;
+        }
+    }
+}
+
+// ROAD_SHADES steps of `hex` from black (never drawn) up to the colour itself.
+static void road_ramp(uint32_t hex, uint16_t *out)
+{
+    int r = (hex >> 16) & 0xFF, g = (hex >> 8) & 0xFF, b = hex & 0xFF;
+    for (int i = 0; i < ROAD_SHADES; i++) {
+        int k = i * 255 / (ROAD_SHADES - 1);
+        out[i] = lv_color_to_u16(lv_color_make(r * k / 255, g * k / 255, b * k / 255));
+    }
+}
+
+// One thick line straight into the frame buffer, each step shaded by how far
+// it is from the route. Not anti-aliased: these are dim background lines, and
+// there can be a few hundred of them per frame, which LVGL's line drawing is
+// far too slow for.
+static void fb_line(uint8_t *fb, uint32_t stride, int x0, int y0, int x1, int y1,
+                    const uint16_t *ramp, int w)
 {
     int minx = x0 < x1 ? x0 : x1, maxx = x0 > x1 ? x0 : x1;
     int miny = y0 < y1 ? y0 : y1, maxy = y0 > y1 ? y0 : y1;
@@ -1145,9 +1256,13 @@ static void fb_line(uint8_t *fb, uint32_t stride, int x0, int y0, int x1, int y1
     int err = dx + dy, h = w / 2;
     for (;;) {
         if (x0 >= h && x0 < BOARD_LCD_W - h && y0 >= h && y0 < BOARD_LCD_H - h) {
-            for (int yy = y0 - h; yy <= y0 + h; yy++) {
-                uint16_t *p = (uint16_t *)(fb + (size_t)yy * stride) + (x0 - h);
-                for (int k = 0; k < w; k++) p[k] = col;
+            int sh = s_road_shade[s_road_dist[(y0 / ROAD_CELL) * ROAD_GRID + x0 / ROAD_CELL]];
+            if (sh) {
+                uint16_t col = ramp[sh];
+                for (int yy = y0 - h; yy <= y0 + h; yy++) {
+                    uint16_t *p = (uint16_t *)(fb + (size_t)yy * stride) + (x0 - h);
+                    for (int k = 0; k < w; k++) p[k] = col;
+                }
             }
         }
         if (x0 == x1 && y0 == y1) break;
@@ -1164,10 +1279,16 @@ static void draw_roads(uint8_t *fb, uint32_t stride)
     if (!rs->n_lines) return;
     double w = world_px();
     float r = s_f_rot * (float)M_PI / 180.0f, c = cosf(r), sn = sinf(r), wf = (float)w;
+    road_fade_build(w, c, sn);
+    static uint16_t minor[ROAD_SHADES], major[ROAD_SHADES];
+    static bool have_ramps;
+    if (!have_ramps) {
+        have_ramps = true;
+        road_ramp(COL_ROAD_MINOR, minor);
+        road_ramp(COL_ROAD_MAJOR, major);
+    }
     // The origin's offset from the view centre, in pixels, before rotation.
     float bx = (float)((rs->onx - s_cx) * w), by = (float)((rs->ony - s_cy) * w);
-    uint16_t minor = lv_color_to_u16(lv_color_hex(COL_ROAD_MINOR));
-    uint16_t major = lv_color_to_u16(lv_color_hex(COL_ROAD_MAJOR));
     for (int l = 0; l < rs->n_lines; l++) {
         const road_line_t *ln = &rs->lines[l];
         int px = 0, py = 0;
