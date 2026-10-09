@@ -7,7 +7,15 @@ Reference material for building a navigation device on the
 > The next phase is firmware design — see [Hardware notes for a nav device](waveshare-2.8c/09-hardware-notes-for-nav.md)
 > for the constraints that will shape that design.
 
-## Contents
+## Plans & reference
+
+| Document | What it covers |
+| --- | --- |
+| [phase-1-plan.md](phase-1-plan.md) | Original Phase 1 plan — offline map, BLE position, pairing |
+| [nav_implementation_guide.md](nav_implementation_guide.md) | OsmAnd turn-by-turn over BLE, and the failures worth remembering |
+| [valhalla-nav-plan.md](valhalla-nav-plan.md) | Valhalla as a second routing source; Google Maps share as the destination picker |
+
+## Waveshare board docs
 
 | Document | What it covers |
 | --- | --- |

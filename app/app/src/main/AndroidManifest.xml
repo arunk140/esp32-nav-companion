@@ -37,10 +37,33 @@
         android:theme="@style/Theme.Material3.DayNight.NoActionBar">
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Share a place from Google Maps (or any app) into Nav Companion. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Tapping a maps or geo: link can open this app too. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="geo" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="maps.app.goo.gl" />
+                <data android:scheme="https" android:host="maps.google.com" />
+                <data android:scheme="https" android:host="www.google.com"
+                    android:pathPrefix="/maps" />
             </intent-filter>
         </activity>
         <activity android:name=".QrScannerActivity" android:exported="false" />

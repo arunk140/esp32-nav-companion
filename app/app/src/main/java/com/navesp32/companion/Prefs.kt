@@ -53,4 +53,24 @@ object Prefs {
     fun setBrightness(ctx: Context, v: Int) {
         prefs(ctx).edit().putInt("brightness", v.coerceIn(0, 100)).apply()
     }
+
+    // ---- navigation source -------------------------------------------------
+
+    /** "osmAnd" (default, reads OsmAnd) or "valhalla" (companion-app routing). */
+    fun navSource(ctx: Context): String = prefs(ctx).getString("navsource", "osmAnd") ?: "osmAnd"
+
+    fun setNavSource(ctx: Context, source: String) {
+        prefs(ctx).edit().putString("navsource", source).apply()
+    }
+
+    /** Valhalla base URL; defaults to the FOSSGIS public demo (dev/testing only). */
+    fun valhallaUrl(ctx: Context): String =
+        prefs(ctx).getString("valhalla_url", ValhallaClient.DEFAULT_BASE_URL)
+            ?: ValhallaClient.DEFAULT_BASE_URL
+
+    fun setValhallaUrl(ctx: Context, url: String) {
+        prefs(ctx).edit().putString("valhalla_url", url.trim().ifEmpty {
+            ValhallaClient.DEFAULT_BASE_URL
+        }).apply()
+    }
 }

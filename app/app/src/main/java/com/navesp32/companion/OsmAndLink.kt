@@ -37,23 +37,9 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
         fun onLinkState(bound: Boolean)
     }
 
-    data class NavState(
-        val active: Boolean,
-        val maneuver: Int,        // our own enum, see NAV_* below
-        val distanceM: Int,      // to the maneuver
-        val street: String,
-        val afterManeuver: Int,
-        val afterDistanceM: Int,
-        val afterStreet: String,
-        val remainingM: Int,
-        val remainingS: Int,
-        val destLat: Double,      // destination; valid only when hasDest
-        val destLon: Double,
-        val hasDest: Boolean,
-    )
-
-    // Our own maneuver vocabulary, deliberately NOT OsmAnd's TurnType numbering:
-    // that is an implementation detail of a project we don't control.
+    // Maneuver vocabulary is shared with ValhallaSource: see Nav.* in
+    // NavModel.kt. NavState lives there too. Deliberately NOT OsmAnd's
+    // TurnType numbering - that is an implementation detail of another project.
     companion object {
         private const val TAG = "OsmAndLink"
         private const val ACTION = "net.osmand.aidl.OsmandAidlServiceV2"
@@ -63,38 +49,23 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
         // while it recomputes; without this the banner flickers on every turn.
         private const val NONE_DEBOUNCE_MS = 2500
 
-        const val NAV_NONE = 0
-        const val NAV_CONTINUE = 1
-        const val NAV_SLIGHT_LEFT = 2
-        const val NAV_LEFT = 3
-        const val NAV_SHARP_LEFT = 4
-        const val NAV_SLIGHT_RIGHT = 5
-        const val NAV_RIGHT = 6
-        const val NAV_SHARP_RIGHT = 7
-        const val NAV_KEEP_LEFT = 8
-        const val NAV_KEEP_RIGHT = 9
-        const val NAV_UTURN = 10
-        const val NAV_ROUNDABOUT = 11
-        const val NAV_OFF_ROUTE = 12
-        const val NAV_ARRIVE = 13
-
         // OsmAnd hands back TurnType.toXmlString() here, e.g. "C", "TL", "TSLL",
         // "RNDB3" (roundabout, exit 3), "OFFR" - NOT an int. Reading it as an
         // int silently mapped every maneuver to CONTINUE.
         private fun mapType(v: String?): Int = when (v?.trim()?.uppercase()) {
-            null, "", "C" -> NAV_CONTINUE
-            "TSLL" -> NAV_SLIGHT_LEFT
-            "TL" -> NAV_LEFT
-            "TSHL" -> NAV_SHARP_LEFT
-            "TSLR" -> NAV_SLIGHT_RIGHT
-            "TR" -> NAV_RIGHT
-            "TSHR" -> NAV_SHARP_RIGHT
-            "KL" -> NAV_KEEP_LEFT
-            "KR" -> NAV_KEEP_RIGHT
-            "TU", "TRU" -> NAV_UTURN
-            "OFFR" -> NAV_OFF_ROUTE
-            else -> if (v!!.trim().startsWith("RNDB") || v.startsWith("RNLB")) NAV_ROUNDABOUT
-                    else NAV_NONE
+            null, "", "C" -> Nav.CONTINUE
+            "TSLL" -> Nav.SLIGHT_LEFT
+            "TL" -> Nav.LEFT
+            "TSHL" -> Nav.SHARP_LEFT
+            "TSLR" -> Nav.SLIGHT_RIGHT
+            "TR" -> Nav.RIGHT
+            "TSHR" -> Nav.SHARP_RIGHT
+            "KL" -> Nav.KEEP_LEFT
+            "KR" -> Nav.KEEP_RIGHT
+            "TU", "TRU" -> Nav.UTURN
+            "OFFR" -> Nav.OFF_ROUTE
+            else -> if (v!!.trim().startsWith("RNDB") || v.startsWith("RNLB")) Nav.ROUNDABOUT
+                    else Nav.NONE
         }
     }
 
@@ -363,7 +334,7 @@ class OsmAndLink(private val ctx: Context, private val cb: Cb) {
             if (lastActive && now - lastSeenActiveMs < NONE_DEBOUNCE_MS) return
             if (lastActive) {
                 lastActive = false
-                cb.onNavState(NavState(false, NAV_NONE, 0, "", NAV_NONE, 0, "", 0, 0,
+                cb.onNavState(NavState(false, Nav.NONE, 0, "", Nav.NONE, 0, "", 0, 0,
                     0.0, 0.0, false))
             }
             return

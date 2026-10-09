@@ -35,6 +35,12 @@ android {
         aidl = true
     }
 
+    // Pure-logic unit tests call code that logs via android.util.Log; return
+    // default values instead of throwing "not mocked".
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     sourceSets["main"].aidl.srcDir("src/main/java")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -59,4 +65,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+
+    // Pure-logic unit tests (polyline decode, projection, nav loop, share parse).
+    testImplementation("junit:junit:4.13.2")
 }

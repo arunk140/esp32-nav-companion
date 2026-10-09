@@ -11,6 +11,9 @@ import android.os.Bundle
 import android.util.Log
 import android.os.Handler
 import android.os.Looper
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -18,24 +21,33 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.navesp32.companion.databinding.ActivityMainBinding
 
-// Status, Scan QR, Connect, Unpair (confirm), service toggle, brightness slider.
+// Status, Scan QR, Connect, Unpair (confirm), service toggle, brightness,
+// routing source, destination list (fed by Google Maps shares).
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val SRC_OSMAND = "osmAnd"
+        private const val SRC_VALHALLA = "valhalla"
     }
 
     private lateinit var b: ActivityMainBinding
     private val handler = Handler(Looper.getMainLooper())
     private var brightJob: Runnable? = null
 
-    // Set while refresh() writes the switch, so its listener does not fire a
-    // command straight back at the device.
+    // Set while refresh()/startNav() writes controls, so listeners do not fire
+    // commands straight back at the device.
     private var updating = false
     private var osmand: OsmAndLink? = null
 
     private val stateRx = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) = refresh()
+    }
+
+    private val navStatusRx = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            intent?.getStringExtra(NavService.EXTRA_NAV_STATUS)?.let { b.navStatus.text = it }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +56,10 @@ class MainActivity : AppCompatActivity() {
         setContentView(b.root)
         ContextCompat.registerReceiver(
             this, stateRx, IntentFilter(NavService.ACTION_STATE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        ContextCompat.registerReceiver(
+            this, navStatusRx, IntentFilter(NavService.ACTION_NAV_STATUS),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
         requestPerms()
@@ -86,7 +102,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 toast("Connecting to OsmAnd...")
                 osmand = OsmAndLink(this, object : OsmAndLink.Cb {
-                    override fun onNavState(s: OsmAndLink.NavState) {
+                    override fun onNavState(s: NavState) {
                         b.navDump.text =
                             "active=${s.active}\nturn=${s.maneuver} in ${s.distanceM} m\n" +
                                 "into: ${s.street}\nthen ${s.afterManeuver} in ${s.afterDistanceM} m\n" +
@@ -102,6 +118,20 @@ class MainActivity : AppCompatActivity() {
                     }
                 }).also { it.start() }
             }
+        }
+        b.sourceGroup.setOnCheckedChangeListener { _, checkedId ->
+            if (updating) return@setOnCheckedChangeListener
+            val src = if (checkedId == R.id.radioValhalla) SRC_VALHALLA else SRC_OSMAND
+            Prefs.setNavSource(this, src)
+            // Switching source ends whatever the previous one was doing.
+            startService(Intent(this, NavService::class.java).setAction(NavService.ACTION_NAV_STOP))
+            b.navStatus.text = ""
+        }
+        b.valhallaUrl.setText(Prefs.valhallaUrl(this))
+        b.valhallaUrl.setOnFocusChangeListener { _, focused -> if (!focused) saveUrl() }
+        b.btnStopNav.setOnClickListener {
+            startService(Intent(this, NavService::class.java).setAction(NavService.ACTION_NAV_STOP))
+            b.navStatus.text = "Navigation stopped"
         }
         b.darkMapToggle.setOnCheckedChangeListener { _, on ->
             if (updating) return@setOnCheckedChangeListener
@@ -159,22 +189,155 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(s: android.widget.SeekBar) {}
             override fun onStopTrackingTouch(s: android.widget.SeekBar) {}
         })
+
+        handleIntent(intent)
+        refreshDestinations()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
     }
 
     override fun onResume() {
         super.onResume()
         refresh()
+        refreshDestinations()
     }
 
     override fun onDestroy() {
         try {
             unregisterReceiver(stateRx)
+            unregisterReceiver(navStatusRx)
         } catch (e: Exception) {
-            Log.w(TAG, "stateRx: $e")
+            Log.w(TAG, "unregister: $e")
         }
         osmand?.stop()
         osmand = null
         super.onDestroy()
+    }
+
+    // ---- destination ingest (Google Maps share) -------------------------
+
+    private fun handleIntent(intent: Intent?) {
+        when (intent?.action) {
+            Intent.ACTION_SEND -> ingestShare(
+                intent.getStringExtra(Intent.EXTRA_TEXT),
+                intent.getStringExtra(Intent.EXTRA_SUBJECT),
+            )
+            Intent.ACTION_VIEW -> {
+                val data = intent.dataString ?: return
+                if (data.startsWith("geo:")) {
+                    MapsShareParser.parseGeo(data)?.let { addParsed(it) }
+                } else {
+                    ingestShare(data, null)
+                }
+            }
+        }
+    }
+
+    private fun ingestShare(text: String?, subject: String?) {
+        val parsed = MapsShareParser.parseShare(text, subject)
+        if (parsed == null) {
+            toast("Couldn't read that share")
+            return
+        }
+        if (parsed.lat != null && parsed.lon != null) {
+            addParsed(parsed)
+            return
+        }
+        val url = parsed.url
+        if (url != null && MapsShareParser.isShortener(url)) {
+            b.navStatus.text = "Resolving link…"
+            Thread {
+                val resolved = LinkResolver.resolve(url)
+                val full = resolved?.let { MapsShareParser.parseUrl(it, parsed.name) }
+                runOnUiThread {
+                    if (full?.lat != null && full.lon != null) {
+                        addParsed(full)
+                    } else {
+                        b.navStatus.text = ""
+                        toast("Couldn't read coordinates from that link")
+                    }
+                }
+            }.start()
+        } else {
+            toast("No coordinates in that share")
+        }
+    }
+
+    private fun addParsed(p: MapsShareParser.Parsed) {
+        val lat = p.lat ?: return
+        val lon = p.lon ?: return
+        val place = PlaceStore.addRecent(this, p.name, lat, lon)
+        refreshDestinations()
+        toast("Added ${place.name}")
+    }
+
+    // ---- destination list ------------------------------------------------
+
+    private fun refreshDestinations() {
+        b.destList.removeAllViews()
+        val places = PlaceStore.loadForDisplay(this)
+        if (places.isEmpty()) {
+            val t = android.widget.TextView(this)
+            t.text = "No places yet — share one from Google Maps."
+            t.textSize = 12f
+            b.destList.addView(t)
+            return
+        }
+        for (p in places) {
+            val btn = Button(this)
+            btn.text = (if (p.saved) "★ " else "") + p.name
+            btn.isAllCaps = false
+            btn.setOnClickListener { startNav(p) }
+            btn.setOnLongClickListener {
+                PlaceStore.toggleSaved(this, p.id)
+                refreshDestinations()
+                toast(if (p.saved) "Unsaved" else "Saved")
+                true
+            }
+            b.destList.addView(
+                btn,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+    }
+
+    private fun startNav(p: Place) {
+        if (Prefs.loadBond(this) == null) {
+            toast("Pair a device first")
+            return
+        }
+        updating = true
+        b.radioValhalla.isChecked = true
+        updating = false
+        Prefs.setNavSource(this, SRC_VALHALLA)
+        PlaceStore.addRecent(this, p.name, p.lat, p.lon)
+        refreshDestinations()
+        Prefs.setServiceEnabled(this, true)
+        b.serviceToggle.isChecked = true
+        // Only (re)start the service when it is not already connected; a
+        // redundant ACTION_START resets the visible link state to "Connecting…"
+        // even though the link is up.
+        if (NavService.linkState != NavService.CONNECTED) NavService.start(this)
+        startService(
+            Intent(this, NavService::class.java)
+                .setAction(NavService.ACTION_NAV_START)
+                .putExtra(NavService.EXTRA_DEST_NAME, p.name)
+                .putExtra(NavService.EXTRA_DEST_LAT_E7, (p.lat * 1e7).toInt())
+                .putExtra(NavService.EXTRA_DEST_LON_E7, (p.lon * 1e7).toInt())
+        )
+        b.navStatus.text = "Routing to ${p.name}…"
+    }
+
+    private fun saveUrl() {
+        Prefs.setValhallaUrl(this, b.valhallaUrl.text.toString())
+        toast("Server URL saved")
     }
 
     private fun refresh() {
@@ -182,6 +345,9 @@ class MainActivity : AppCompatActivity() {
         val st = NavService.linkState
         updating = true
         b.darkMapToggle.isChecked = Prefs.darkMap(this)
+        b.radioValhalla.isChecked = Prefs.navSource(this) == SRC_VALHALLA
+        b.radioOsmand.isChecked = Prefs.navSource(this) != SRC_VALHALLA
+        if (!b.valhallaUrl.hasFocus()) b.valhallaUrl.setText(Prefs.valhallaUrl(this))
         updating = false
         b.status.text = if (bond == null) {
             "Not paired — tap Scan QR"

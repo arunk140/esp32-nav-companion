@@ -30,9 +30,16 @@ class NavService : Service() {
         const val ACTION_SLEEP = "com.navesp32.companion.SLEEP"
         const val ACTION_THEME = "com.navesp32.companion.THEME"
         const val ACTION_THEME_STATE = "com.navesp32.companion.THEME_STATE"
+        const val ACTION_NAV_START = "com.navesp32.companion.NAV_START"
+        const val ACTION_NAV_STOP = "com.navesp32.companion.NAV_STOP"
+        const val ACTION_NAV_STATUS = "com.navesp32.companion.NAV_STATUS"
         const val EXTRA_DARK_MAP = "darkMap"
         const val EXTRA_BRIGHTNESS = "brightness"
         const val EXTRA_FRESH = "fresh"
+        const val EXTRA_DEST_NAME = "destName"
+        const val EXTRA_DEST_LAT_E7 = "destLatE7"
+        const val EXTRA_DEST_LON_E7 = "destLonE7"
+        const val EXTRA_NAV_STATUS = "navStatus"
         private const val CH = "nav"
         private const val NOTIF_ID = 41
         private const val TAG = "NavService"
@@ -76,6 +83,8 @@ class NavService : Service() {
     private var media: MediaBridge? = null
     private var nav: NavBridge? = null
     private var osmand: OsmAndLink? = null
+    private var valhalla: ValhallaSource? = null
+    private var lastFix: Fix? = null
     private var call: CallBridge? = null
     private var connected = false
     private val main = Handler(Looper.getMainLooper())
@@ -132,13 +141,13 @@ class NavService : Service() {
             override fun navLinkReady() = ble?.mediaReady == true
         })
         osmand = OsmAndLink(this, object : OsmAndLink.Cb {
-            override fun onNavState(s: OsmAndLink.NavState) {
+            override fun onNavState(s: NavState) {
                 nav?.send(s)
             }
 
             override fun onConsentNeeded() {
                 nav?.send(
-                    OsmAndLink.NavState(false, 0, 0, "", 0, 0, "", 0, 0, 0.0, 0.0, false),
+                    NavState(false, 0, 0, "", 0, 0, "", 0, 0, 0.0, 0.0, false),
                     noAccess = true
                 )
                 updateNotif("Enable Nav Companion in OsmAnd -> Plugins")
@@ -148,6 +157,11 @@ class NavService : Service() {
                 if (!bound) nav?.sendStopped()
             }
         })
+        valhalla = ValhallaSource(
+            baseUrl = { Prefs.valhallaUrl(this) },
+            out = nav!!,
+            onStatus = { text -> onNavStatus(text) },
+        )
         media = MediaBridge(this, object : MediaBridge.Out {
             override fun mediaWrite(data: ByteArray, tag: String?) {
                 ble?.writeMedia(data, tag)
@@ -176,6 +190,7 @@ class NavService : Service() {
         loc?.stop()
         media?.stop()
         osmand?.stop()
+        valhalla?.stop()
         call?.stop()
         ble?.disconnect()
         super.onDestroy()
@@ -245,6 +260,22 @@ class NavService : Service() {
                 }
                 return START_STICKY
             }
+            ACTION_NAV_START -> {
+                val name = intent.getStringExtra(EXTRA_DEST_NAME) ?: "Destination"
+                val latE7 = intent.getIntExtra(EXTRA_DEST_LAT_E7, 0)
+                val lonE7 = intent.getIntExtra(EXTRA_DEST_LON_E7, 0)
+                if (latE7 != 0 || lonE7 != 0) {
+                    osmand?.stop()
+                    valhalla?.setDestination(name, latE7 / 1e7, lonE7 / 1e7)
+                }
+                return START_STICKY
+            }
+            ACTION_NAV_STOP -> {
+                valhalla?.stop()
+                osmand?.stop()
+                onNavStatus("Navigation ended")
+                return START_STICKY
+            }
             else -> { /* START below */ }
         }
         Prefs.setServiceEnabled(this, true)
@@ -269,6 +300,7 @@ class NavService : Service() {
                         // stop polling OsmAnd while the board cannot use it.
                         nav?.reset()
                         osmand?.stop()
+                        valhalla?.stop()
                         call?.stop()
                     }
                 }
@@ -292,7 +324,7 @@ class NavService : Service() {
                     media?.sendAll()
                     // Turn-by-turn only makes sense over an up link, and
                     // binding OsmAnd while asleep is wasteful.
-                    osmand?.start()
+                    startNavSource()
                 }
 
                 override fun onMediaCmd(cmd: ByteArray) {
@@ -309,8 +341,10 @@ class NavService : Service() {
             })
         }
         if (loc == null) {
-            loc = LocationStream(this) { payload ->
-                if (connected) ble?.writePosition(payload)
+            loc = LocationStream(this) { fix ->
+                lastFix = fix
+                if (connected) ble?.writePosition(fix.payload)
+                if (connected) valhalla?.onFix(fix)
             }
         }
         val fresh = intent?.getBooleanExtra(EXTRA_FRESH, false) == true
@@ -357,5 +391,24 @@ class NavService : Service() {
 
     private fun updateNotif(text: String) {
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notif(text))
+    }
+
+    // Link came up: start whichever routing source the user selected. Valhalla
+    // needs no binding; it waits for a destination from ACTION_NAV_START.
+    private fun startNavSource() {
+        if (Prefs.navSource(this) == "valhalla") {
+            osmand?.stop()
+        } else {
+            valhalla?.stop()
+            osmand?.start()
+        }
+    }
+
+    private fun onNavStatus(text: String) {
+        updateNotif(text)
+        sendBroadcast(
+            Intent(ACTION_NAV_STATUS).setPackage(packageName)
+                .putExtra(EXTRA_NAV_STATUS, text)
+        )
     }
 }

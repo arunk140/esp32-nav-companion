@@ -10,9 +10,24 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 
-// Fused location -> packed 18 B POSITION payloads. 1 Hz connected, 5 Hz debug.
+/**
+ * One fused-location fix. Carries both the raw position (for Valhalla's nav
+ * loop) and the packed 18 B POSITION payload (for the device), so the two
+ * consumers share a single location stream.
+ */
+class Fix(
+    val lat: Double,
+    val lon: Double,
+    val speedMps: Float,
+    val bearingDeg: Float,
+    val accuracyM: Float,
+    val hasFix: Boolean,
+    val payload: ByteArray,
+)
+
+// Fused location -> raw fixes + packed 18 B POSITION payloads. 1 Hz connected, 5 Hz debug.
 @SuppressLint("MissingPermission")
-class LocationStream(private val ctx: Context, private val onFix: (ByteArray) -> Unit) {
+class LocationStream(private val ctx: Context, private val onFix: (Fix) -> Unit) {
 
     companion object {
         const val INTERVAL_MS = 1000L
@@ -38,17 +53,28 @@ class LocationStream(private val ctx: Context, private val onFix: (ByteArray) ->
             lastMs = now
             n++
             if (n % 10 == 0) android.util.Log.i("LocationStream", "fixes=$n")
-            val sats = if (l.hasAccuracy()) 0 else 0 // fused API hides SV count; 0 = unknown
+            val sats = 0 // fused API hides SV count; 0 = unknown
+            val hasFix = l.hasAccuracy() && l.accuracy < 50
             val payload = BleManager.packPosition(
                 (l.latitude * 1e7).toInt(),
                 (l.longitude * 1e7).toInt(),
                 (l.speed * 100).toInt().coerceIn(0, 65535),
                 ((l.bearing * 100).toInt().coerceIn(0, 35999)),
                 sats,
-                if (l.hasAccuracy() && l.accuracy < 50) 1 else 0,
+                if (hasFix) 1 else 0,
                 System.currentTimeMillis()
             )
-            onFix(payload)
+            onFix(
+                Fix(
+                    lat = l.latitude,
+                    lon = l.longitude,
+                    speedMps = l.speed,
+                    bearingDeg = l.bearing,
+                    accuracyM = if (l.hasAccuracy()) l.accuracy else -1f,
+                    hasFix = hasFix,
+                    payload = payload,
+                )
+            )
         }
     }
 
