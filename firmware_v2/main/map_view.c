@@ -50,6 +50,10 @@
 #define COL_DEST 0xE8710A
 #define COL_ROUTE_L 0x1A73E8   // Google-blue route line, light map
 #define COL_ROUTE_D 0x8AB4F8   // lighter blue, dark map
+// Congestion, the colours the phone's own route line uses.
+#define COL_TRAFFIC_1 0xE8923D  // moderate
+#define COL_TRAFFIC_2 0xD93838  // heavy
+#define COL_TRAFFIC_3 0xA3261E  // severe
 // The part of the route already covered.
 #define COL_DONE_L 0xA4A9B0     // light map
 #define COL_DONE_D 0x5F656D     // dark map
@@ -104,6 +108,32 @@ static void (*s_media_cb)(void);
 static void (*s_sleep_cb)(void);
 static bool s_sleep_req;
 
+// How far along the route each of its points is, 0..1 of its length, and the
+// congested stretches in the same terms, sorted by where they start.
+static float s_route_frac[ROUTE_MAX];
+typedef struct {
+    float a, b;
+    uint8_t level;
+} traffic_t;
+static traffic_t s_traffic[NAV_TRAFFIC_MAX];
+static int s_traffic_n;
+// Where the marker is along the route (set by route_locate, further down).
+static int s_route_seg;
+static float s_route_t;
+
+static uint32_t traffic_hex(int level)
+{
+    return level <= 1 ? COL_TRAFFIC_1 : level == 2 ? COL_TRAFFIC_2 : COL_TRAFFIC_3;
+}
+
+// The marker's place along the route as a fraction of its length.
+static float route_frac_now(void)
+{
+    if (!s_route_active || s_route_n < 2 || s_route_seg > s_route_n - 2) return 0.0f;
+    return s_route_frac[s_route_seg] +
+           (s_route_frac[s_route_seg + 1] - s_route_frac[s_route_seg]) * s_route_t;
+}
+
 // Minimal display (see map_view.h). It keeps its own zoom: the map's is tied
 // to the zoom levels on the SD card, and this mode has no tiles to match.
 #define MINI_ZOOM_MIN 12
@@ -149,6 +179,7 @@ static int s_phone_batt = -1;
 static bool s_phone_charging;
 static uint32_t s_clock_epoch, s_clock_at;
 static bool s_clock_ok;
+static bool s_clock_24h;  // the phone's choice; 12-hour with AM/PM otherwise
 static int (*s_bright_cb)(int delta);
 static bool s_turn_near;
 static uint32_t s_scale_t;
@@ -657,22 +688,43 @@ static void draw_progress(lv_layer_t *layer)
     a.start_angle = PROG_A0;
     a.end_angle = PROG_A1;
     lv_draw_arc(layer, &a);
+    // Congestion ahead, laid on the unfilled part of the arc: the rest of the
+    // route from the marker to its end maps onto the arc from here to its end.
+    float f0 = route_frac_now();
+    if (s_traffic_n && f0 < 0.999f) {
+        float span = (float)(PROG_A1 - PROG_A0), done = p / 1000.0f;
+        a.width = 5;
+        a.radius = PROG_R - 1;
+        for (int i = 0; i < s_traffic_n; i++) {
+            const traffic_t *t = &s_traffic[i];
+            if (t->b <= f0) continue;
+            float u0 = ((t->a > f0 ? t->a : f0) - f0) / (1.0f - f0);
+            float u1 = (t->b - f0) / (1.0f - f0);
+            // Along the arc, 0 at its filled end; the arc runs from A1 down to A0.
+            float e = PROG_A1 - span * (done + (1.0f - done) * u0);
+            float st = PROG_A1 - span * (done + (1.0f - done) * u1);
+            if (e - st < 1.0f) st = e - 1.0f;  // a short jam still shows
+            a.color = lv_color_hex(traffic_hex(t->level));
+            a.start_angle = st;
+            a.end_angle = e;
+            lv_draw_arc(layer, &a);
+        }
+    }
     if (p > 0) {
         a.radius = PROG_R;
         a.width = 7;
         a.rounded = 1;
         a.color = lv_color_white();
         a.start_angle = PROG_A1 - (PROG_A1 - PROG_A0) * p / 1000;
+        a.end_angle = PROG_A1;
         lv_draw_arc(layer, &a);
     }
 }
 
 // Where the marker is along the route: segment index (points seg, seg + 1)
-// and the fraction of that segment already covered. Found per frame in screen
-// space, near the last answer first so a route that doubles back on itself
-// cannot jump ahead to its return leg.
-static int s_route_seg;
-static float s_route_t;
+// and the fraction of that segment already covered (s_route_seg, s_route_t).
+// Found per frame in screen space, near the last answer first so a route that
+// doubles back on itself cannot jump ahead to its return leg.
 
 // Nearest point on segments [lo, hi] to (mx, my). Returns the squared distance.
 static float route_nearest(const int32_t *rx, const int32_t *ry, int lo, int hi, float mx, float my,
@@ -717,6 +769,40 @@ static void route_locate(const int32_t *rx, const int32_t *ry)
     }
     s_route_seg = seg;
     s_route_t = t;
+}
+
+static void route_seg(lv_layer_t *layer, lv_draw_line_dsc_t *d, float ax, float ay, float bx, float by);
+
+// A piece of the route still ahead, from route fraction fa at (ax, ay) to fb
+// at (bx, by), with its congested parts in their colours and the rest in base.
+static void route_ahead(lv_layer_t *layer, lv_draw_line_dsc_t *d, lv_color_t base,
+                        float ax, float ay, float fa, float bx, float by, float fb)
+{
+    float len = fb - fa;
+    if (!s_traffic_n || len <= 1e-7f) {
+        d->color = base;
+        route_seg(layer, d, ax, ay, bx, by);
+        return;
+    }
+    float f = fa;
+    for (int i = 0; i < s_traffic_n && f < fb; i++) {
+        const traffic_t *t = &s_traffic[i];
+        if (t->b <= f || t->a >= fb) continue;
+        float s0 = t->a > f ? t->a : f, s1 = t->b < fb ? t->b : fb;
+        float u = (f - fa) / len, u0 = (s0 - fa) / len, u1 = (s1 - fa) / len;
+        if (s0 > f) {
+            d->color = base;
+            route_seg(layer, d, ax + (bx - ax) * u, ay + (by - ay) * u, ax + (bx - ax) * u0, ay + (by - ay) * u0);
+        }
+        d->color = lv_color_hex(traffic_hex(t->level));
+        route_seg(layer, d, ax + (bx - ax) * u0, ay + (by - ay) * u0, ax + (bx - ax) * u1, ay + (by - ay) * u1);
+        f = s1;
+    }
+    if (f < fb) {
+        float u = (f - fa) / len;
+        d->color = base;
+        route_seg(layer, d, ax + (bx - ax) * u, ay + (by - ay) * u, bx, by);
+    }
 }
 
 static void route_seg(lv_layer_t *layer, lv_draw_line_dsc_t *d, float ax, float ay, float bx, float by)
@@ -770,9 +856,20 @@ static void draw_route(lv_layer_t *layer)
 
         d.color = pass == 0 ? casing
                   : s_minimal ? lv_color_white() : lv_color_hex(dark ? COL_ROUTE_D : COL_ROUTE_L);
-        route_seg(layer, &d, px, py, rx[seg + 1], ry[seg + 1]);
-        for (int k = seg + 1; k < s_route_n - 1; k++) {
-            route_seg(layer, &d, rx[k], ry[k], rx[k + 1], ry[k + 1]);
+        if (pass == 0) {
+            route_seg(layer, &d, px, py, rx[seg + 1], ry[seg + 1]);
+            for (int k = seg + 1; k < s_route_n - 1; k++) {
+                route_seg(layer, &d, rx[k], ry[k], rx[k + 1], ry[k + 1]);
+            }
+        } else {
+            // The fill carries the congestion colours; the casing does not.
+            lv_color_t base = d.color;
+            route_ahead(layer, &d, base, px, py, route_frac_now(), rx[seg + 1], ry[seg + 1],
+                        s_route_frac[seg + 1]);
+            for (int k = seg + 1; k < s_route_n - 1; k++) {
+                route_ahead(layer, &d, base, rx[k], ry[k], s_route_frac[k], rx[k + 1], ry[k + 1],
+                            s_route_frac[k + 1]);
+            }
         }
     }
 }
@@ -1416,7 +1513,12 @@ static uint32_t clock_now(void)
 static void fmt_clock(char *out, size_t cap, uint32_t local_s)
 {
     uint32_t m = local_s / 60 % 1440;
-    lv_snprintf(out, cap, "%02u:%02u", (unsigned)(m / 60), (unsigned)(m % 60));
+    unsigned h = (unsigned)(m / 60), mm = (unsigned)(m % 60);
+    if (s_clock_24h) {
+        lv_snprintf(out, cap, "%02u:%02u", h, mm);
+    } else {
+        lv_snprintf(out, cap, "%u:%02u %s", h % 12 ? h % 12 : 12, mm, h < 12 ? "AM" : "PM");
+    }
 }
 
 // One dot per face that can show, the current one bright.
@@ -1448,7 +1550,7 @@ static void draw_eta(lv_layer_t *layer)
     int rem_s = nav_view_remaining_s();
     uint32_t now = clock_now();
     if (now) {
-        char hm[8];
+        char hm[12];
         fmt_clock(hm, sizeof(hm), now + (uint32_t)rem_s);
         lv_snprintf(buf, sizeof(buf), "ETA %s", hm);
         draw_text(layer, buf, &lv_font_montserrat_28, lv_color_hex(0xB0B8C0), HALF, 150, 300);
@@ -2204,6 +2306,7 @@ void map_view_route_reset(void)
 {
     s_route_n = 0;
     s_route_active = false;
+    s_traffic_n = 0;  // it belonged to the old line
 }
 
 void map_view_route_add(const int32_t *lat_e7, const int32_t *lon_e7, int n)
@@ -2215,9 +2318,39 @@ void map_view_route_add(const int32_t *lat_e7, const int32_t *lon_e7, int n)
     }
 }
 
+void map_view_traffic(const uint8_t *data, size_t len)
+{
+    if (len < 2 || data[0] != NAV_TRAFFIC) return;
+    int n = data[1];
+    if (n > NAV_TRAFFIC_MAX || len < 2 + (size_t)n * 5) return;
+    s_traffic_n = 0;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *r = data + 2 + i * 5;
+        uint16_t a, b;
+        memcpy(&a, r, 2);
+        memcpy(&b, r + 2, 2);
+        if (b <= a || !r[4]) continue;
+        s_traffic[s_traffic_n++] = (traffic_t){a / 65535.0f, b / 65535.0f, r[4]};
+    }
+    invalidate();
+}
+
 void map_view_route_commit(void)
 {
     s_route_active = s_route_n >= 2;
+    // Each point's place along the line, for laying congestion on it. Flat
+    // distances with the east-west scale of the route's own latitude.
+    if (s_route_active) {
+        double coslat = cos(s_route_lat[0] / 1e7 * M_PI / 180.0), total = 0.0;
+        s_route_frac[0] = 0.0f;
+        for (int i = 1; i < s_route_n; i++) {
+            double dy = (double)(s_route_lat[i] - s_route_lat[i - 1]);
+            double dx = (double)(s_route_lon[i] - s_route_lon[i - 1]) * coslat;
+            total += sqrt(dx * dx + dy * dy);
+            s_route_frac[i] = (float)total;
+        }
+        for (int i = 1; i < s_route_n; i++) s_route_frac[i] = total > 0 ? (float)(s_route_frac[i] / total) : 0.0f;
+    }
     s_route_seg = 0;  // a new line: start looking from its beginning
     s_route_t = 0.0f;
     invalidate();
@@ -2228,6 +2361,7 @@ void map_view_route_clear(void)
     if (!s_route_active && s_route_n == 0) return;
     s_route_n = 0;
     s_route_active = false;
+    s_traffic_n = 0;
     invalidate();
 }
 
@@ -2258,8 +2392,10 @@ float map_view_rotation(void)
     return s_rot;
 }
 
-void map_view_set_phone(int battery_pct, bool charging, uint32_t local_epoch_s)
+void map_view_set_phone(int battery_pct, bool charging, bool clock_24h, uint32_t local_epoch_s)
 {
+    if (clock_24h != s_clock_24h) invalidate();
+    s_clock_24h = clock_24h;
     s_phone_batt = battery_pct;
     s_phone_charging = charging;
     s_clock_epoch = local_epoch_s;

@@ -54,6 +54,10 @@ void map_view_set_media_cb(void (*cb)(void));
 void map_view_set_sleep_cb(void (*cb)(void));
 void map_view_set_zoom(int z);
 
+// Congestion along the current route: one NAV_TRAFFIC write as it arrived.
+// Colours the route line and the trip progress arc. GUI task only.
+void map_view_traffic(const uint8_t *data, size_t len);
+
 // Nearby streets, drawn dimly under the route in the minimal display. Takes
 // one NAV_ROADS write as it arrived (see ble_service.h); a set becomes visible
 // when its last chunk is in. GUI task only.
@@ -65,9 +69,10 @@ void map_view_roads_chunk(const uint8_t *data, size_t len);
 // of the road ahead shows.
 void map_view_set_minimal(bool on);
 
-// The phone's battery (percent, -1 unknown) and its local time, for the
-// minimal display's faces. The clock keeps running from the last value.
-void map_view_set_phone(int battery_pct, bool charging, uint32_t local_epoch_s);
+// The phone's battery (percent, -1 unknown), its local time and whether it
+// shows times on a 24-hour clock, for the minimal display's faces. The clock
+// keeps running from the last value.
+void map_view_set_phone(int battery_pct, bool charging, bool clock_24h, uint32_t local_epoch_s);
 
 // The battery face has brightness buttons. cb(delta) changes the brightness by
 // that many percent and returns the level in use; cb(0) only asks.

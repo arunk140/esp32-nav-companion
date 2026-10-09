@@ -187,12 +187,13 @@ static void ble_on_nav_dest(bool present, int32_t lat_e7, int32_t lon_e7)
 static volatile bool s_limit_dirty, s_limit_mph;
 static volatile uint16_t s_limit_val;
 
-static volatile bool s_phone_dirty, s_phone_charging;
+static volatile bool s_phone_dirty, s_phone_charging, s_phone_24h;
 static volatile int s_phone_batt;
 static volatile uint32_t s_phone_epoch;
 
-static void ble_on_phone_info(int battery_pct, bool charging, uint32_t local_epoch_s)
+static void ble_on_phone_info(int battery_pct, bool charging, bool clock_24h, uint32_t local_epoch_s)
 {
+    s_phone_24h = clock_24h;
     s_phone_batt = battery_pct;
     s_phone_charging = charging;
     s_phone_epoch = local_epoch_s;
@@ -221,6 +222,17 @@ static void ble_on_roads_chunk(const uint8_t *data, size_t len)
     // A full queue drops the chunk; map_view sees the gap in seq and throws
     // the whole set away, so a partial set is never drawn.
     xQueueSend(s_roads_q, &c, 0);
+}
+
+// Congestion for the route: one message, latest wins. It is drained after the
+// route chunks in the same pass, so it always lands on the route it came with.
+static QueueHandle_t s_traffic_q;
+
+static void ble_on_traffic(const uint8_t *data, size_t len)
+{
+    roads_chunk_t c = {.len = (uint8_t)len};
+    memcpy(c.data, data, len);
+    xQueueOverwrite(s_traffic_q, &c);
 }
 
 static void ble_on_route_chunk(uint8_t flags, uint8_t seq, uint8_t count,
@@ -548,7 +560,7 @@ static void process_events(void)
     }
     if (s_phone_dirty) {
         s_phone_dirty = false;
-        map_view_set_phone(s_phone_batt, s_phone_charging, s_phone_epoch);
+        map_view_set_phone(s_phone_batt, s_phone_charging, s_phone_24h, s_phone_epoch);
     }
     if (s_limit_dirty) {
         s_limit_dirty = false;
@@ -558,6 +570,7 @@ static void process_events(void)
     process_route();
     roads_chunk_t rc;
     while (xQueueReceive(s_roads_q, &rc, 0) == pdTRUE) map_view_roads_chunk(rc.data, rc.len);
+    if (xQueueReceive(s_traffic_q, &rc, 0) == pdTRUE) map_view_traffic(rc.data, rc.len);
     text_msg_t tm;
     if (xQueueReceive(s_text_q, &tm, 0) == pdTRUE) media_view_set_text(tm.title, tm.artist);
     nav_media_state_t ms;
@@ -847,6 +860,7 @@ void app_main(void)
     s_call_q = xQueueCreate(1, sizeof(call_msg_t));
     s_route_q = xQueueCreate(8, sizeof(route_chunk_t));
     s_roads_q = xQueueCreate(16, sizeof(roads_chunk_t));
+    s_traffic_q = xQueueCreate(1, sizeof(roads_chunk_t));
 
     show_screen(settings_paired() ? SCREEN_MAP : SCREEN_PAIR);
 
@@ -861,6 +875,7 @@ void app_main(void)
         .on_nav_dest = ble_on_nav_dest,
         .on_nav_limit = ble_on_nav_limit,
         .on_phone_info = ble_on_phone_info,
+        .on_traffic = ble_on_traffic,
         .on_roads_chunk = ble_on_roads_chunk,
         .on_route_chunk = ble_on_route_chunk,
         .on_call_ring = ble_on_call_ring,

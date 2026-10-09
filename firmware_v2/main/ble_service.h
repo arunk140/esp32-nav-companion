@@ -93,11 +93,21 @@
 #define NAV_ROADS_CHUNK_MAX 252
 
 // The phone's battery and clock (added 2026-10-09). 12 bytes:
-//   [0] 0x07, [1] battery percent (0xFF = unknown), [2] flags (bit0 charging),
+//   [0] 0x07, [1] battery percent (0xFF = unknown), [2] flags (bit0 charging,
+//   bit1 show times on a 24-hour clock, else 12-hour with AM/PM),
 //   [3] 0, [4..7] u32 Unix time in seconds, [8..9] i16 minutes east of UTC,
 //   [10..11] 0. Sent after connecting and about once a minute.
 #define NAV_PHONE 0x07
 #define NAV_PHONE_LEN 12
+
+// Congestion along the route (added 2026-10-09). One write:
+//   [0] 0x08, [1] count n (0..NAV_TRAFFIC_MAX), then n * (u16 start, u16 end,
+//   u8 level): where the stretch starts and ends as a fraction of the route's
+//   length (0..65535), and how bad it is (1 moderate, 2 heavy, 3 severe).
+// Sent after the route it belongs to; a new route drops the old stretches,
+// and n = 0 clears them.
+#define NAV_TRAFFIC 0x08
+#define NAV_TRAFFIC_MAX 50
 
 #define NAV_NONE 0
 #define NAV_CONTINUE 1
@@ -245,8 +255,11 @@ typedef struct {
     // NimBLE host task: copy and return.
     void (*on_roads_chunk)(const uint8_t *data, size_t len);
 
+    // One NAV_TRAFFIC write, header included. NimBLE host task: copy and return.
+    void (*on_traffic)(const uint8_t *data, size_t len);
+
     // Phone battery (-1 unknown) and local time as seconds since the epoch.
-    void (*on_phone_info)(int battery_pct, bool charging, uint32_t local_epoch_s);
+    void (*on_phone_info)(int battery_pct, bool charging, bool clock_24h, uint32_t local_epoch_s);
 
     // Speed limit in the phone's units; limit 0 = unknown. mph is false for km/h.
     void (*on_nav_limit)(bool mph, uint16_t limit);

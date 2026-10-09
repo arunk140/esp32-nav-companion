@@ -217,11 +217,16 @@ static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
         if (s_cbs.on_nav_dest) {
             s_cbs.on_nav_dest(b[1] != 0, (int32_t)le32(b + 2), (int32_t)le32(b + 6));
         }
+    } else if (b[0] == NAV_TRAFFIC) {
+        if (len < 2 || b[1] > NAV_TRAFFIC_MAX || len < 2 + (size_t)b[1] * 5) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        if (s_cbs.on_traffic) s_cbs.on_traffic(b, len);
     } else if (b[0] == NAV_PHONE) {
         if (len < NAV_PHONE_LEN) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         int16_t tz_min = (int16_t)le16(b + 8);
         if (s_cbs.on_phone_info) {
-            s_cbs.on_phone_info(b[1] == 0xFF ? -1 : b[1], (b[2] & 1) != 0,
+            s_cbs.on_phone_info(b[1] == 0xFF ? -1 : b[1], (b[2] & 1) != 0, (b[2] & 2) != 0,
                                 le32(b + 4) + (uint32_t)((int32_t)tz_min * 60));
         }
     } else if (b[0] == NAV_ROADS) {
