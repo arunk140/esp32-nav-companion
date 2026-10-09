@@ -16,6 +16,7 @@
 #define KEY_HAS_POS "has_pos"
 #define KEY_ZOOM "zoom"
 #define KEY_DARKMAP "darkmap"
+#define KEY_MINIMAL "minimal"
 
 static char s_name[16];
 static char s_token[8];
@@ -23,6 +24,7 @@ static bool s_paired;
 static uint8_t s_brightness = NAV_BRIGHTNESS_DEFAULT;
 static uint8_t s_zoom;
 static bool s_dark_map;
+static bool s_minimal;
 static bool s_has_pos;
 static int32_t s_lat, s_lon;
 
@@ -59,6 +61,7 @@ esp_err_t settings_init(void)
     if (nvs_get_u8(h, KEY_BRIGHTNESS, &v) == ESP_OK && v <= 100) s_brightness = v;
     if (nvs_get_u8(h, KEY_ZOOM, &v) == ESP_OK) s_zoom = v;
     if (nvs_get_u8(h, KEY_DARKMAP, &v) == ESP_OK) s_dark_map = v != 0;
+    if (nvs_get_u8(h, KEY_MINIMAL, &v) == ESP_OK) s_minimal = v != 0;
     if (nvs_get_u8(h, KEY_HAS_POS, &v) == ESP_OK && v) {
         s_has_pos = nvs_get_i32(h, KEY_LAST_LAT, &s_lat) == ESP_OK &&
                     nvs_get_i32(h, KEY_LAST_LON, &s_lon) == ESP_OK;
@@ -172,4 +175,16 @@ void settings_set_last_pos(int32_t lat_e7, int32_t lon_e7)
     s_has_pos = true;
     s_lat = lat_e7;
     s_lon = lon_e7;
+}
+
+bool settings_minimal(void)
+{
+    return s_minimal;
+}
+
+void settings_set_minimal(bool on)
+{
+    if (on == s_minimal) return;
+    s_minimal = on;
+    put_u8(KEY_MINIMAL, on ? 1 : 0);
 }

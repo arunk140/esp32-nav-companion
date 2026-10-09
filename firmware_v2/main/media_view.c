@@ -209,6 +209,13 @@ static void refresh_controls(void)
 
 // ---------------------------------------------------------------- input
 
+static void swipe_back_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev && lv_indev_get_gesture_dir(indev) == LV_DIR_RIGHT && s_on_back) s_on_back();
+}
+
 static void back_cb(lv_event_t *e)
 {
     (void)e;
@@ -293,6 +300,9 @@ static lv_obj_t *make_arc(lv_obj_t *parent, int d, int w, uint32_t ind_col)
 void media_view_create(lv_obj_t *parent, void (*on_back)(void))
 {
     s_on_back = on_back;
+    // A swipe to the right goes back, the way a swipe to the left got here
+    // from the minimal display. The callback only asks for the screen change.
+    lv_obj_add_event_cb(parent, swipe_back_cb, LV_EVENT_GESTURE, NULL);
     lv_obj_set_style_bg_color(parent, lv_color_hex(MEDIA_ART_BG), 0);
     lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
     lv_obj_set_scrollable(parent, false);
@@ -393,8 +403,12 @@ void media_view_set_change_cb(void (*cb)(void))
     s_change_cb = cb;
 }
 
+static void swipe_back_cb(lv_event_t *e);
+
 void media_view_destroy(void)
 {
+    // The screen object outlives this view, so its gesture hook has to go.
+    lv_obj_remove_event_cb(lv_screen_active(), swipe_back_cb);
     // Objects are deleted by the caller cleaning the screen.
     s_root = s_img = s_placeholder = s_prog = s_vol = s_msg = NULL;
     s_lbl_title = s_lbl_artist = NULL;

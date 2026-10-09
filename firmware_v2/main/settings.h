@@ -26,6 +26,10 @@ void settings_set_brightness(uint8_t pct);
 bool settings_dark_map(void);
 void settings_set_dark_map(bool dark);
 
+// Minimal display: black screen, route line and next turn only, no map tiles.
+bool settings_minimal(void);
+void settings_set_minimal(bool on);
+
 uint8_t settings_zoom(void);  // 0 = unset
 void settings_set_zoom(uint8_t z);
 

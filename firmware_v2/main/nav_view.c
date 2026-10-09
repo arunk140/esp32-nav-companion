@@ -38,6 +38,11 @@ static nav_state_t s_st;
 static char s_street[NAV_TEXT_MAX + 1];
 static bool s_have;
 static uint32_t s_last_ms;
+static bool s_minimal;
+static bool s_suppressed;
+static uint16_t s_limit;
+static bool s_mph;
+static uint16_t s_total_m;  // longest remaining distance seen this trip
 
 // ---- UI ----
 static lv_obj_t *s_banner, *s_lbl_street, *s_lbl_dist, *s_lbl_left;
@@ -227,7 +232,7 @@ static void refresh(void)
     if (!s_banner) return;
     bool active = s_have && (s_st.flags & NAV_F_ACTIVE) &&
                   (now_ms() - s_last_ms) < STALE_MS;
-    lv_obj_set_hidden(s_banner, !active);
+    lv_obj_set_hidden(s_banner, !active || s_suppressed);
     if (!active) return;
 
     char buf[MAX_DIST_LABEL + 4];
@@ -245,6 +250,74 @@ static void refresh(void)
     if (rm >= 10000) snprintf(left, sizeof(left), "%.1f km left", rm / 1000.0f);
     else snprintf(left, sizeof(left), "%u m left", rm);
     lv_label_set_text(s_lbl_left, left);
+    lv_obj_set_hidden(s_lbl_left, s_minimal);
+}
+
+// Normal: a dark box, street over distance. Minimal: no box, a large distance
+// over a dimmer street name.
+static void layout(void)
+{
+    if (!s_banner) return;
+    // Minimal: no box of its own. The map screen lays a translucent black band
+    // under it that runs to the bottom of the screen (nav_view_banner_top).
+    lv_obj_set_style_bg_opa(s_banner, s_minimal ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    lv_obj_set_style_text_font(s_lbl_dist,
+                               s_minimal ? &lv_font_montserrat_40 : &lv_font_montserrat_28, 0);
+    lv_obj_align(s_lbl_dist, LV_ALIGN_TOP_LEFT, TEXT_X, s_minimal ? 2 : 40);
+    lv_obj_align(s_lbl_street, LV_ALIGN_TOP_LEFT, TEXT_X, s_minimal ? 54 : 10);
+    lv_obj_set_style_text_color(s_lbl_street, lv_color_hex(s_minimal ? COL_DIST : COL_STREET), 0);
+    lv_obj_invalidate(s_banner);
+}
+
+int nav_view_banner_top(void)
+{
+    return BANNER_Y;
+}
+
+void nav_view_set_suppressed(bool on)
+{
+    s_suppressed = on;
+    refresh();
+}
+
+void nav_view_set_limit(bool mph, uint16_t limit)
+{
+    s_mph = mph;
+    s_limit = limit;
+}
+
+uint16_t nav_view_limit(void)
+{
+    return s_limit;
+}
+
+bool nav_view_mph(void)
+{
+    return s_mph;
+}
+
+int nav_view_dist_m(void)
+{
+    return nav_view_active() ? s_st.dist_m : -1;
+}
+
+int nav_view_remaining_m(void)
+{
+    return nav_view_active() ? s_st.remaining_m : -1;
+}
+
+void nav_view_set_minimal(bool on)
+{
+    s_minimal = on;
+    layout();
+    refresh();
+}
+
+int nav_view_progress_permille(void)
+{
+    if (!nav_view_active() || !s_total_m) return -1;
+    if (s_st.maneuver == NAV_ARRIVE) return 1000;
+    return 1000 - (int)((uint32_t)s_st.remaining_m * 1000u / s_total_m);
 }
 
 static void banner_draw_cb(lv_event_t *e)
@@ -311,6 +384,7 @@ void nav_view_init(void)
     lv_obj_set_style_text_align(s_lbl_left, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(s_lbl_left, LV_ALIGN_TOP_RIGHT, -12, 52);  // banner-local
 
+    layout();
     refresh();
 }
 
@@ -337,6 +411,11 @@ void nav_view_update(const nav_state_t *st, const char *street)
 #endif
         s_st = *st;
         s_have = true;
+        if (!(st->flags & NAV_F_ACTIVE)) {
+            s_total_m = 0;
+        } else if (st->remaining_m > s_total_m) {
+            s_total_m = st->remaining_m;
+        }
         s_last_ms = now_ms();
         // Changing the maneuver must repaint it: lv_label_set_text below only
         // invalidates the label areas, so the icon would otherwise stay stale.
@@ -385,6 +464,8 @@ uint16_t nav_view_remaining_s(void)
 void nav_view_clear(void)
 {
     s_have = false;
+    s_total_m = 0;
+    s_limit = 0;
     s_street[0] = '\0';
     if (s_banner) {
         if (s_lbl_street) lv_label_set_text(s_lbl_street, "");

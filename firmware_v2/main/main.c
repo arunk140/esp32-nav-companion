@@ -70,6 +70,17 @@ typedef struct {
 } nav_msg_t;
 static QueueHandle_t s_nav_q;    // nav state + street + destination (overwrite)
 
+// Route geometry chunks: ordered, unlike the overwrite-latest nav slot. The
+// BLE callback only queues; the GUI task assembles into map_view.
+typedef struct {
+    uint8_t flags, seq, count;
+    int32_t lat[NAV_ROUTE_CHUNK_MAX];
+    int32_t lon[NAV_ROUTE_CHUNK_MAX];
+} route_chunk_t;
+static QueueHandle_t s_route_q;
+static uint8_t s_route_seq;
+static bool s_route_bad;
+
 // Incoming call. One overwrite-latest slot: a ring that is immediately
 // followed by an end must not leave a stale screen up.
 typedef struct {
@@ -167,6 +178,47 @@ static void ble_on_nav_dest(bool present, int32_t lat_e7, int32_t lon_e7)
     m.dest_lat_e7 = lat_e7;
     m.dest_lon_e7 = lon_e7;
     xQueueOverwrite(s_nav_q, &m);
+}
+
+// The limit is two small values, latest wins: no queue, the GUI loop picks
+// them up. Written in the NimBLE host task, read in the GUI task.
+static volatile bool s_limit_dirty, s_limit_mph;
+static volatile uint16_t s_limit_val;
+
+static void ble_on_nav_limit(bool mph, uint16_t limit)
+{
+    s_limit_mph = mph;
+    s_limit_val = limit;
+    s_limit_dirty = true;
+}
+
+// Nearby-street chunks: ordered like the route's. The parsing is map_view's.
+typedef struct {
+    uint8_t len;
+    uint8_t data[NAV_ROADS_CHUNK_MAX];
+} roads_chunk_t;
+static QueueHandle_t s_roads_q;
+
+static void ble_on_roads_chunk(const uint8_t *data, size_t len)
+{
+    if (len > NAV_ROADS_CHUNK_MAX) return;
+    roads_chunk_t c = {.len = (uint8_t)len};
+    memcpy(c.data, data, len);
+    // A full queue drops the chunk; map_view sees the gap in seq and throws
+    // the whole set away, so a partial set is never drawn.
+    xQueueSend(s_roads_q, &c, 0);
+}
+
+static void ble_on_route_chunk(uint8_t flags, uint8_t seq, uint8_t count,
+                               const int32_t *lat_e7, const int32_t *lon_e7)
+{
+    if (count > NAV_ROUTE_CHUNK_MAX) return;
+    route_chunk_t c = {.flags = flags, .seq = seq, .count = count};
+    memcpy(c.lat, lat_e7, (size_t)count * sizeof(int32_t));
+    memcpy(c.lon, lon_e7, (size_t)count * sizeof(int32_t));
+    // Ordered: a full queue drops a chunk, the seq check below then discards
+    // the whole route rather than drawing a gap. The phone re-sends on reroute.
+    xQueueSend(s_route_q, &c, 0);
 }
 
 static void ble_on_link(bool up)
@@ -312,6 +364,23 @@ static void local_reset(void)
 
 // Theme change: cached tiles are dropped by tiles_set_dark() and re-read, so
 // the repaint below is only for the placeholder colours.
+// Minimal display on or off, from the phone, a long press on the map, or the
+// stored setting at boot.
+static void set_minimal(bool on)
+{
+    settings_set_minimal(on);
+    map_view_set_minimal(on);
+    nav_view_set_minimal(on);
+    nav_ble_set_minimal(on);
+}
+
+static void toggle_minimal(void)
+{
+    bool on = !settings_minimal();
+    set_minimal(on);
+    map_view_toast(on ? "Minimal display" : "Map");
+}
+
 static void set_theme(bool dark)
 {
     tiles_set_dark(dark);
@@ -355,6 +424,9 @@ static void handle_cmd(const app_ev_t *ev)
     case NAV_CMD_SET_THEME:
         if (ev->len >= 1) set_theme(ev->args[0] != 0);
         break;
+    case NAV_CMD_SET_MINIMAL:
+        if (ev->len >= 1) set_minimal(ev->args[0] != 0);
+        break;
     case NAV_CMD_SLEEP:
         enter_deep_sleep();
         break;
@@ -369,6 +441,29 @@ static void handle_cmd(const app_ev_t *ev)
         break;
     default:
         break;
+    }
+}
+
+// Assemble queued route chunks in order. Runs in the GUI task so map_view is
+// touched from one task only.
+static void process_route(void)
+{
+    route_chunk_t c;
+    while (xQueueReceive(s_route_q, &c, 0) == pdTRUE) {
+        if (c.flags & NAV_ROUTE_F_START) {
+            s_route_seq = 0;
+            s_route_bad = false;
+            map_view_route_reset();
+        }
+        if (s_route_bad) continue;
+        if (c.seq != s_route_seq) {
+            s_route_bad = true;
+            map_view_route_clear();
+            continue;
+        }
+        s_route_seq++;
+        if (c.count) map_view_route_add(c.lat, c.lon, c.count);
+        if ((c.flags & NAV_ROUTE_F_END) && !s_route_bad) map_view_route_commit();
     }
 }
 
@@ -391,6 +486,7 @@ static void process_events(void)
             // and no destination.
             nav_view_clear();
             map_view_set_dest(false, 0, 0);
+            map_view_route_clear();
             // A dropped link also ends any call UI: the phone can no longer
             // update it, and the page must not linger.
             call_view_clear();
@@ -412,10 +508,21 @@ static void process_events(void)
             // Navigation stopped -> the destination pin goes with it. (No
             // point waiting for the next DEST with present=0; arrival may
             // never send one.)
-            if (!(nm.st.flags & NAV_F_ACTIVE)) map_view_set_dest(false, 0, 0);
+            if (!(nm.st.flags & NAV_F_ACTIVE)) {
+                map_view_set_dest(false, 0, 0);
+                map_view_route_clear();
+            }
         }
         if (nm.have_dest) map_view_set_dest(nm.dest_present, nm.dest_lat_e7, nm.dest_lon_e7);
     }
+    if (s_limit_dirty) {
+        s_limit_dirty = false;
+        nav_view_set_limit(s_limit_mph, s_limit_val);
+        map_view_invalidate();
+    }
+    process_route();
+    roads_chunk_t rc;
+    while (xQueueReceive(s_roads_q, &rc, 0) == pdTRUE) map_view_roads_chunk(rc.data, rc.len);
     text_msg_t tm;
     if (xQueueReceive(s_text_q, &tm, 0) == pdTRUE) media_view_set_text(tm.title, tm.artist);
     nav_media_state_t ms;
@@ -676,6 +783,8 @@ void app_main(void)
     set_theme(settings_dark_map());
     display_init();
     map_view_init_state();
+    set_minimal(settings_minimal());
+    map_view_set_mode_cb(toggle_minimal);
     map_view_set_reset_cb(local_reset);
     map_view_set_media_cb(open_media);
     map_view_set_sleep_cb(enter_deep_sleep);
@@ -691,6 +800,8 @@ void app_main(void)
     s_text_q = xQueueCreate(1, sizeof(text_msg_t));
     s_nav_q = xQueueCreate(1, sizeof(nav_msg_t));
     s_call_q = xQueueCreate(1, sizeof(call_msg_t));
+    s_route_q = xQueueCreate(8, sizeof(route_chunk_t));
+    s_roads_q = xQueueCreate(16, sizeof(roads_chunk_t));
 
     show_screen(settings_paired() ? SCREEN_MAP : SCREEN_PAIR);
 
@@ -703,6 +814,9 @@ void app_main(void)
         .on_media_text = ble_on_media_text,
         .on_nav_state = ble_on_nav_state,
         .on_nav_dest = ble_on_nav_dest,
+        .on_nav_limit = ble_on_nav_limit,
+        .on_roads_chunk = ble_on_roads_chunk,
+        .on_route_chunk = ble_on_route_chunk,
         .on_call_ring = ble_on_call_ring,
         .on_call_end = ble_on_call_end,
     };

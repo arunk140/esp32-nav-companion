@@ -23,6 +23,7 @@ static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile uint8_t s_fps;
 static uint16_t s_status_h;
 static volatile uint8_t s_theme;
+static volatile uint8_t s_minimal;
 static struct ble_npl_event s_forget_ev, s_disc_ev, s_mcmd_ev, s_ccmd_ev;
 static uint16_t s_media_cmd_h;
 static volatile bool s_media_sub;
@@ -85,7 +86,8 @@ static int chr_status(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
     (void)attr;
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
-    uint8_t s[5] = {0, 0, s_conn != BLE_HS_CONN_HANDLE_NONE ? 1 : 0, s_fps, s_theme ? 1 : 0};
+    uint8_t s[6] = {0, 0, s_conn != BLE_HS_CONN_HANDLE_NONE ? 1 : 0, s_fps, s_theme ? 1 : 0,
+                    s_minimal ? 1 : 0};
     return os_mbuf_append(ctxt->om, s, sizeof(s)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
@@ -182,7 +184,8 @@ static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
     uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
-    uint8_t b[NAV_TEXT_MAX + 2];
+    // Large enough for the biggest route chunk (4 + 31*8 = 252 B).
+    uint8_t b[256];
     if (len < 1 || len > sizeof(b)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     if (ble_hs_mbuf_to_flat(ctxt->om, b, sizeof(b), NULL) != 0) return BLE_ATT_ERR_UNLIKELY;
     if (b[0] == NAV_STATE) {
@@ -214,6 +217,24 @@ static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
         if (s_cbs.on_nav_dest) {
             s_cbs.on_nav_dest(b[1] != 0, (int32_t)le32(b + 2), (int32_t)le32(b + 6));
         }
+    } else if (b[0] == NAV_ROADS) {
+        if (len < NAV_ROADS_HDR || len > NAV_ROADS_CHUNK_MAX) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        if (s_cbs.on_roads_chunk) s_cbs.on_roads_chunk(b, len);
+    } else if (b[0] == NAV_LIMIT) {
+        if (len < NAV_LIMIT_LEN) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        if (s_cbs.on_nav_limit) s_cbs.on_nav_limit(b[1] != 0, le16(b + 2));
+    } else if (b[0] == NAV_ROUTE) {
+        if (len < NAV_ROUTE_HDR) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint8_t count = b[3];
+        if (count > NAV_ROUTE_CHUNK_MAX) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        if (len < NAV_ROUTE_HDR + (size_t)count * 8) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        int32_t lat[NAV_ROUTE_CHUNK_MAX], lon[NAV_ROUTE_CHUNK_MAX];
+        for (uint8_t i = 0; i < count; i++) {
+            lat[i] = (int32_t)le32(b + NAV_ROUTE_HDR + i * 8);
+            lon[i] = (int32_t)le32(b + NAV_ROUTE_HDR + i * 8 + 4);
+        }
+        // Copy into the GUI queue, not into map_view: this is the host task.
+        if (s_cbs.on_route_chunk) s_cbs.on_route_chunk(b[1], b[2], count, lat, lon);
     }
     return 0;
 }
@@ -589,6 +610,11 @@ bool nav_ble_connected(void)
 void nav_ble_set_theme(uint8_t dark)
 {
     s_theme = dark;
+}
+
+void nav_ble_set_minimal(uint8_t on)
+{
+    s_minimal = on;
 }
 
 void nav_ble_set_fps(uint8_t fps)

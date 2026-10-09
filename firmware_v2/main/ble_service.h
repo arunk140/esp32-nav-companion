@@ -52,6 +52,43 @@
 #define NAV_F_ACTIVE 0x01   // navigation is running
 #define NAV_F_NO_ACCESS 0x02 // app could not read OsmAnd
 
+// Route geometry for the map (added 2026-10-05). Valhalla returns the route
+// shape (OsmAnd never did), so the device can draw the actual line. A route can
+// be hundreds of points, so it arrives in chunks on the same characteristic:
+//   [0] 0x04, [1] flags (bit0 START, bit1 END), [2] seq, [3] count,
+//   [4..] count * (i32 lat_e7, i32 lon_e7), little-endian.
+// A single START|END chunk with count=0 clears the route. Chunks are written
+// with tag=null (never coalesced), unlike STATE.
+#define NAV_ROUTE 0x04
+#define NAV_ROUTE_HDR 4
+#define NAV_ROUTE_CHUNK_MAX 31
+#define NAV_ROUTE_F_START 0x01
+#define NAV_ROUTE_F_END 0x02
+
+// Posted speed limit and the units to show speeds in (added 2026-10-09):
+//   [0] 0x05, [1] units (0 = km/h, 1 = mph), [2..3] u16 limit in those units,
+//   0 = not known. Sent when either changes and once after connecting, so the
+//   units arrive even where no limit is known.
+#define NAV_LIMIT 0x05
+#define NAV_LIMIT_LEN 4
+
+// Nearby streets for the minimal display (added 2026-10-09): outlines of the
+// named roads around the phone, so the route is not floating in empty black.
+// Sent in ordered chunks on the nav characteristic, never coalesced:
+//   [0] 0x06, [1] flags (bit0 START, bit1 END), [2] seq, [3] 0
+//   START only: [4..7] i32 lat_e7, [8..11] i32 lon_e7 of the origin
+//   then records, each whole within its chunk:
+//     u8 n (2..NAV_ROADS_LINE_MAX), u8 class (0 minor, 1 major),
+//     n * (i16 dlat, i16 dlon) in 1e-5 degrees from the origin
+// A new set replaces the old one when its END arrives. START|END with no
+// records clears them.
+#define NAV_ROADS 0x06
+#define NAV_ROADS_HDR 4
+#define NAV_ROADS_F_START 0x01
+#define NAV_ROADS_F_END 0x02
+#define NAV_ROADS_LINE_MAX 60
+#define NAV_ROADS_CHUNK_MAX 252
+
 #define NAV_NONE 0
 #define NAV_CONTINUE 1
 #define NAV_SLIGHT_LEFT 2
@@ -130,6 +167,7 @@
 #define NAV_CMD_PAIR 0x06            // 6 ASCII digits = QR token
 #define NAV_CMD_SLEEP 0x07           // deep sleep now; touch is the only way back
 #define NAV_CMD_SET_THEME 0x08       // u8: 0 = light map, 1 = dark map
+#define NAV_CMD_SET_MINIMAL 0x09     // u8: 0 = map, 1 = minimal display (no tiles)
 
 // POSITION (write / write-no-rsp), 18 bytes little-endian:
 //   i32 lat 1e-7 deg, i32 lon 1e-7 deg, u16 speed cm/s, u16 cog 0.01 deg,
@@ -137,7 +175,8 @@
 #define NAV_POSITION_LEN 18
 
 // STATUS (read/notify): u16 battery mV (0 = USB), u8 link, u8 fps,
-// u8 theme (0 light, 1 dark)
+// u8 theme (0 light, 1 dark), u8 minimal display (0 map, 1 minimal; added
+// 2026-10-09, absent on older firmware)
 
 typedef struct {
     int32_t lat_e7;
@@ -191,12 +230,25 @@ typedef struct {
     // Destination for the map marker. present=false means "no destination"
     // (navigation ended): clear it.
     void (*on_nav_dest)(bool present, int32_t lat_e7, int32_t lon_e7);
+
+    // One NAV_ROADS write, header included (data[0] == NAV_ROADS). Runs in the
+    // NimBLE host task: copy and return.
+    void (*on_roads_chunk)(const uint8_t *data, size_t len);
+
+    // Speed limit in the phone's units; limit 0 = unknown. mph is false for km/h.
+    void (*on_nav_limit)(bool mph, uint16_t limit);
+
+    // Route geometry chunk. Runs in the NimBLE host task: copy and return.
+    // count <= NAV_ROUTE_CHUNK_MAX; lat_e7/lon_e7 point to count valid entries.
+    void (*on_route_chunk)(uint8_t flags, uint8_t seq, uint8_t count,
+                           const int32_t *lat_e7, const int32_t *lon_e7);
 } nav_ble_cbs_t;
 
 void nav_ble_start(const nav_ble_cbs_t *cbs, const char *device_name);
 bool nav_ble_connected(void);
 void nav_ble_set_fps(uint8_t fps);
 void nav_ble_set_theme(uint8_t dark);  // reported back in STATUS
+void nav_ble_set_minimal(uint8_t on);  // reported back in STATUS
 
 // Sends a MEDIA_CMD notification (any task; no-op unless the phone has
 // subscribed).

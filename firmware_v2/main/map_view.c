@@ -1,4 +1,5 @@
 #include "map_view.h"
+#include "ble_service.h"
 #include "nav_view.h"
 #include "board.h"
 #include "display.h"
@@ -8,6 +9,7 @@
 #include "tiles.h"
 #include "touch.h"
 #include "esp_attr.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -42,9 +44,16 @@
 #define COL_MISSING_L 0xD9DCE0
 #define COL_PENDING_D 0x2A2E33
 #define COL_MISSING_D 0x14181C
-#define COL_LIVE 0x1A73E8
+#define COL_LIVE 0x1A73E8     // position marker, dark map
+#define COL_LIVE_L 0x174EA6   // position marker, light map: darker than the route
 #define COL_STALE 0x8A8F96
 #define COL_DEST 0xE8710A
+#define COL_ROUTE_L 0x1A73E8   // Google-blue route line, light map
+#define COL_ROUTE_D 0x8AB4F8   // lighter blue, dark map
+// The part of the route already covered.
+#define COL_DONE_L 0xA4A9B0     // light map
+#define COL_DONE_D 0x5F656D     // dark map
+#define COL_DONE_MINI 0x44484E  // minimal display, on black
 #define COL_GREEN 0x34A853
 #define COL_AMBER 0xF9AB00
 #define COL_GRAY 0x9AA0A6
@@ -62,6 +71,11 @@ static bool s_was_nav;
 static double s_mx, s_my;   // marker as displayed (animated)
 static bool s_has_dest;     // destination marker (from the phone)
 static double s_dnx, s_dny; // destination, normalized Web-Mercator
+// Route line (Valhalla geometry), assembled from BLE chunks. GUI task only.
+#define ROUTE_MAX 512
+static int32_t s_route_lat[ROUTE_MAX], s_route_lon[ROUTE_MAX];
+static int s_route_n;
+static bool s_route_active;
 static uint32_t s_line_anim_ms;  // last marching-dots invalidate
 static int s_line_phase;         // dot-pattern offset, advanced per frame
 static double s_ax, s_ay, s_bx, s_by;
@@ -81,7 +95,7 @@ static bool s_connected, s_paired;
 
 // ---- UI objects (valid only while the map screen exists) ----
 static lv_obj_t *s_map, *s_pill, *s_pill_dot, *s_pill_lbl;
-static lv_obj_t *s_btn_in, *s_btn_out, *s_btn_center, *s_toast;
+static lv_obj_t *s_btn_in, *s_btn_out, *s_btn_center, *s_btn_media, *s_toast;
 static uint32_t s_toast_until;
 static int s_status_key = -1;
 static int s_status_eta_min = -1;   // last ETA minutes drawn (nav pill)
@@ -89,6 +103,61 @@ static void (*s_reset_cb)(void);
 static void (*s_media_cb)(void);
 static void (*s_sleep_cb)(void);
 static bool s_sleep_req;
+
+// Minimal display (see map_view.h). It keeps its own zoom: the map's is tied
+// to the zoom levels on the SD card, and this mode has no tiles to match.
+#define MINI_ZOOM_MIN 12
+#define MINI_ZOOM_MAX 18
+#define MINI_ZOOM_DEFAULT 17
+// Scale on top of zoom 17. CRUISE is the normal view: about 0.7 m per pixel,
+// so roughly 210 m of road shows ahead of the arrow. Nearing a turn the view
+// pulls back to TURN (half of that, about 420 m ahead), and closes in again
+// once the next turn is further than TURN_FAR_M, which means this one is
+// behind us. The gap between NEAR and FAR stops it hunting when the distance
+// hovers. NEAR sits just past what CRUISE can show, so the pull-back starts as
+// the turn is about to come into view.
+#define CRUISE_SCALE 1.6
+#define TURN_SCALE 0.8
+#define TURN_NEAR_M 250
+#define TURN_FAR_M 320
+#define SCALE_RATE 2.5f       // 1/s, exponential ease
+#define SWIPE_MIN_PX 70       // sideways travel that counts as a swipe
+#define MINI_AHEAD_PX 60      // the arrow sits this far below the centre
+#define MODE_HOLD_MS 900      // long press on the map switches mode
+static bool s_minimal;
+static int s_zoom_other = MINI_ZOOM_DEFAULT;  // the zoom of the mode not shown
+static void (*s_mode_cb)(void);
+static bool s_mode_req;
+static uint32_t s_press_t0;
+static bool s_press_fired;
+static int s_prog_shown = -2;
+static bool s_speedo;         // minimal display showing the speedometer
+// Which face the user asked for by swiping: 1 speedometer, 0 route, -1 no
+// choice. With no choice the speedometer shows whenever no drive is running,
+// since the route view has nothing to draw then. A drive starting or ending
+// clears the choice.
+static int s_speedo_pref = -1;
+static bool s_turn_near;
+static uint32_t s_scale_t;
+static lv_point_t s_press_pt;
+static int32_t s_speedo_key = -1;
+
+static inline int zoom_min(void)
+{
+    return s_minimal ? MINI_ZOOM_MIN : s_zmin;
+}
+
+static inline int zoom_max(void)
+{
+    return s_minimal ? MINI_ZOOM_MAX : s_zmax;
+}
+
+// Overlay colours follow the background, which is black in minimal mode
+// whatever the tile theme says.
+static inline bool dark_bg(void)
+{
+    return s_minimal || tiles_dark();
+}
 static uint32_t s_last_tap_ms;
 static int s_tap_count;
 static bool s_reset_req;
@@ -125,9 +194,13 @@ static double lat_to_ny(double lat)
     return (1.0 - log(tan(r) + 1.0 / cos(r)) / M_PI) / 2.0;
 }
 
+// Minimal display only: a smooth zoom factor on top of the integer level,
+// used to pull back for a turn. 1.0 everywhere else, so tiles are unaffected.
+static double s_scale = 1.0;
+
 static inline double world_px(void)
 {
-    return 256.0 * (double)(1u << s_zoom);
+    return 256.0 * (double)(1u << s_zoom) * s_scale;
 }
 
 static inline int32_t floordiv(int32_t a, int32_t b)
@@ -205,30 +278,72 @@ static void invalidate(void)
 #define MARKER_SCALE 0.6f
 #define MARK_HALO_R (24.0f * MARKER_SCALE)
 #define MARK_DOT_R (11.0f * MARKER_SCALE)
-#define MARK_RING_W 1
+#define MARK_RING_W 2
+#define MARK_EDGE 2.0f  // white edge around the heading arrow, px
 #define MARK_CONE_LEN (36.0f * MARKER_SCALE)
 #define MARK_CONE_W (15.0f * MARKER_SCALE)
+
+// One heading-arrow triangle: tip `len` px ahead of (x, y), base corners `w`
+// px out at +/-0.55 rad either side of the heading `a`.
+static void draw_arrow(lv_layer_t *layer, int32_t x, int32_t y, float a, float len, float w,
+                       lv_color_t color)
+{
+    lv_draw_triangle_dsc_t t;
+    lv_draw_triangle_dsc_init(&t);
+    t.color = color;
+    t.opa = LV_OPA_COVER;
+    t.p[0].x = x + sinf(a) * len;
+    t.p[0].y = y - cosf(a) * len;
+    t.p[1].x = x + sinf(a - 0.55f) * w;
+    t.p[1].y = y - cosf(a - 0.55f) * w;
+    t.p[2].x = x + sinf(a + 0.55f) * w;
+    t.p[2].y = y - cosf(a + 0.55f) * w;
+    lv_draw_triangle(layer, &t);
+}
+
+// Minimal display's marker: a notched arrowhead, white on black. A black
+// copy a little larger goes underneath so it stays apart from the white route
+// line it sits on.
+static void chevron(lv_layer_t *layer, int32_t x, int32_t y, float a, float k, lv_color_t color)
+{
+    // (forward, right) in px: tip, right tail, notch, left tail.
+    static const float pts[4][2] = {{17.0f, 0.0f}, {-12.0f, 12.0f}, {-6.0f, 0.0f}, {-12.0f, -12.0f}};
+    lv_point_precise_t q[4];
+    float sn = sinf(a), c = cosf(a);
+    for (int i = 0; i < 4; i++) {
+        float f = pts[i][0] * k, r = pts[i][1] * k;
+        q[i].x = x + sn * f + c * r;
+        q[i].y = y - c * f + sn * r;
+    }
+    lv_draw_triangle_dsc_t t;
+    lv_draw_triangle_dsc_init(&t);
+    t.color = color;
+    t.opa = LV_OPA_COVER;
+    t.p[0] = q[0], t.p[1] = q[1], t.p[2] = q[2];
+    lv_draw_triangle(layer, &t);
+    t.p[0] = q[0], t.p[1] = q[2], t.p[2] = q[3];
+    lv_draw_triangle(layer, &t);
+}
+
+static void draw_chevron(lv_layer_t *layer, int32_t x, int32_t y, float a, bool live)
+{
+    chevron(layer, x, y, a, 1.45f, lv_color_black());
+    chevron(layer, x, y, a, 1.0f, lv_color_hex(live ? 0xFFFFFF : COL_STALE));
+}
 
 static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
 {
     bool live = fix_is_live();
-    lv_color_t c = lv_color_hex(live ? COL_LIVE : COL_STALE);
-    int32_t hr = (int32_t)lroundf(MARK_HALO_R), dr = (int32_t)lroundf(MARK_DOT_R);
-
-    if (live && s_moving) {
-        float a = ((float)s_cog_cdeg / 100.0f - rot) * (float)M_PI / 180.0f;
-        lv_draw_triangle_dsc_t t;
-        lv_draw_triangle_dsc_init(&t);
-        t.color = c;
-        t.opa = LV_OPA_70;
-        t.p[0].x = x + sinf(a) * MARK_CONE_LEN;
-        t.p[0].y = y - cosf(a) * MARK_CONE_LEN;
-        t.p[1].x = x + sinf(a - 0.55f) * MARK_CONE_W;
-        t.p[1].y = y - cosf(a - 0.55f) * MARK_CONE_W;
-        t.p[2].x = x + sinf(a + 0.55f) * MARK_CONE_W;
-        t.p[2].y = y - cosf(a + 0.55f) * MARK_CONE_W;
-        lv_draw_triangle(layer, &t);
+    // The marker sits on the route and, heading-up, its arrow lies along it.
+    // Drawn in the route's own blue it vanished into the line, so on a light
+    // map (route 0x1A73E8 in a white casing) the marker is a darker blue, and
+    // the arrow is opaque with a white edge on both themes.
+    if (s_minimal) {
+        draw_chevron(layer, x, y, ((float)s_cog_cdeg / 100.0f - rot) * (float)M_PI / 180.0f, live);
+        return;
     }
+    lv_color_t c = lv_color_hex(!live ? COL_STALE : tiles_dark() ? COL_LIVE : COL_LIVE_L);
+    int32_t hr = (int32_t)lroundf(MARK_HALO_R), dr = (int32_t)lroundf(MARK_DOT_R);
 
     lv_draw_rect_dsc_t r;
     lv_draw_rect_dsc_init(&r);
@@ -237,6 +352,13 @@ static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
     r.bg_opa = LV_OPA_20;
     lv_area_t halo = {x - hr, y - hr, x + hr, y + hr};
     lv_draw_rect(layer, &r, &halo);
+
+    if (live && s_moving) {
+        float a = ((float)s_cog_cdeg / 100.0f - rot) * (float)M_PI / 180.0f;
+        draw_arrow(layer, x, y, a, MARK_CONE_LEN + 2.0f * MARK_EDGE, MARK_CONE_W + MARK_EDGE,
+                   lv_color_white());
+        draw_arrow(layer, x, y, a, MARK_CONE_LEN, MARK_CONE_W, c);
+    }
 
     r.bg_opa = LV_OPA_COVER;
     r.border_color = lv_color_white();
@@ -257,7 +379,7 @@ static void draw_dest(lv_layer_t *layer, int32_t x, int32_t y)
     r.radius = LV_RADIUS_CIRCLE;
     r.bg_color = lv_color_hex(COL_DEST);
     r.bg_opa = LV_OPA_COVER;
-    r.border_color = lv_color_hex(tiles_dark() ? 0x000000 : 0xFFFFFF);
+    r.border_color = lv_color_hex(dark_bg() ? 0x000000 : 0xFFFFFF);
     r.border_width = 2;
     r.border_opa = LV_OPA_60;
     lv_area_t disc = {x - DEST_R, y - DEST_R, x + DEST_R, y + DEST_R};
@@ -300,7 +422,7 @@ static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
     lv_draw_rect_dsc_t d;
     lv_draw_rect_dsc_init(&d);
     d.radius = LINK_W;              // capsule caps
-    d.bg_color = lv_color_hex(tiles_dark() ? LINK_COL_DARK : LINK_COL_LIGHT);
+    d.bg_color = lv_color_hex(dark_bg() ? LINK_COL_DARK : LINK_COL_LIGHT);
     d.bg_opa = LV_OPA_70;
     d.border_opa = LV_OPA_TRANSP;
 
@@ -340,14 +462,310 @@ static void draw_dest_line(lv_layer_t *layer, int32_t x0, int32_t y0,
     }
 }
 
+// Route polyline. Drawn before the markers so they sit on top; the bowed
+// "suggested route" line is suppressed when this is present. Screen-space
+// projection is shared with the marker, so it follows pan/zoom/heading-up.
+// Origin + rotation used by the frame being rendered (blit + marker agree).
+static int32_t s_f_ox, s_f_oy;
+static float s_f_rot;
+
+#define ROUTE_CASING 9
+#define ROUTE_W 5
+#define ROUTE_W_MINI 11
+
+// Trip progress along the bottom edge of the round screen (minimal display).
+// Angles are LVGL's: clockwise from 3 o'clock, so 90 is the bottom. The arc
+// fills from its left end; 50..130 keeps both ends clear of the turn banner.
+#define PROG_A0 50
+#define PROG_A1 130
+#define PROG_R 226
+
+static void draw_text(lv_layer_t *layer, const char *txt, const lv_font_t *font, lv_color_t col,
+                      int32_t cx, int32_t cy, int32_t w)
+{
+    lv_draw_label_dsc_t d;
+    lv_draw_label_dsc_init(&d);
+    d.text = txt;
+    d.text_local = 1;  // drawn later: LVGL must keep its own copy
+    d.font = font;
+    d.color = col;
+    d.align = LV_TEXT_ALIGN_CENTER;
+    int32_t h = lv_font_get_line_height(font);
+    lv_area_t a = {cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2};
+    lv_draw_label(layer, &d, &a);
+}
+
+// The posted limit as a road sign: white disc, red ring, black number.
+// Nothing is drawn while the limit is unknown.
+static void draw_limit_sign(lv_layer_t *layer, int32_t cx, int32_t cy, int32_t r,
+                            const lv_font_t *font)
+{
+    uint16_t lim = nav_view_limit();
+    if (!lim) return;
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.radius = LV_RADIUS_CIRCLE;
+    d.bg_color = lv_color_white();
+    d.bg_opa = LV_OPA_COVER;
+    d.border_color = lv_color_hex(0xD93025);
+    d.border_width = r / 5 + 1;
+    d.border_opa = LV_OPA_COVER;
+    lv_area_t a = {cx - r, cy - r, cx + r, cy + r};
+    lv_draw_rect(layer, &d, &a);
+    char buf[8];
+    lv_snprintf(buf, sizeof(buf), "%u", lim);
+    draw_text(layer, buf, font, lv_color_black(), cx, cy, 2 * r);
+}
+
+// Speedometer. The scale runs 270 degrees clockwise from the lower left
+// (LVGL angle 135) in SPD_SEGS steps. Steps up to the current speed are white
+// bars that get longer as they go; the rest are dots. A red dot marks the limit.
+#define SPD_A0 135.0f
+#define SPD_SWEEP 270.0f
+#define SPD_SEGS 54
+#define SPD_R_OUT 228
+#define SPD_R_DOT 210
+#define SPD_MAX_KMH 160
+#define SPD_MAX_MPH 100
+
+static int speed_units(void)
+{
+    // cm/s -> km/h or mph, rounded.
+    float k = nav_view_mph() ? 0.0223694f : 0.036f;
+    return (int)lroundf(s_speed_cms * k);
+}
+
+static void draw_speedo(lv_layer_t *layer)
+{
+    bool live = fix_is_live();
+    int max = nav_view_mph() ? SPD_MAX_MPH : SPD_MAX_KMH;
+    int v = live ? speed_units() : 0;
+    uint16_t lim = nav_view_limit();
+    int filled = v * SPD_SEGS / max;
+    if (filled > SPD_SEGS) filled = SPD_SEGS;
+
+    lv_draw_line_dsc_t bar;
+    lv_draw_line_dsc_init(&bar);
+    bar.color = lv_color_white();
+    bar.width = 7;
+    lv_draw_rect_dsc_t dot;
+    lv_draw_rect_dsc_init(&dot);
+    dot.radius = LV_RADIUS_CIRCLE;
+    dot.bg_opa = LV_OPA_COVER;
+    dot.bg_color = lv_color_hex(0x5F6368);
+    for (int i = 0; i <= SPD_SEGS; i++) {
+        float a = (SPD_A0 + SPD_SWEEP * i / SPD_SEGS) * (float)M_PI / 180.0f;
+        float c = cosf(a), sn = sinf(a);
+        if (i < filled) {
+            float r_in = 204.0f - 26.0f * i / SPD_SEGS;
+            bar.p1.x = HALF + c * r_in;
+            bar.p1.y = HALF + sn * r_in;
+            bar.p2.x = HALF + c * SPD_R_OUT;
+            bar.p2.y = HALF + sn * SPD_R_OUT;
+            lv_draw_line(layer, &bar);
+        } else if (i % 3 == 0) {
+            int32_t x = HALF + (int32_t)lroundf(c * SPD_R_DOT), y = HALF + (int32_t)lroundf(sn * SPD_R_DOT);
+            lv_area_t d = {x - 2, y - 2, x + 2, y + 2};
+            lv_draw_rect(layer, &dot, &d);
+        }
+    }
+    if (lim && lim <= max) {
+        float a = (SPD_A0 + SPD_SWEEP * lim / max) * (float)M_PI / 180.0f;
+        int32_t x = HALF + (int32_t)lroundf(cosf(a) * SPD_R_DOT), y = HALF + (int32_t)lroundf(sinf(a) * SPD_R_DOT);
+        dot.bg_color = lv_color_hex(0xD93025);
+        lv_area_t d = {x - 6, y - 6, x + 6, y + 6};
+        lv_draw_rect(layer, &dot, &d);
+    }
+
+    draw_limit_sign(layer, HALF, 150, 38, &lv_font_montserrat_28);
+
+    char buf[24];
+    if (live) lv_snprintf(buf, sizeof(buf), "%d", v);
+    else lv_snprintf(buf, sizeof(buf), "--");
+    bool over = live && lim && v > lim;
+    draw_text(layer, buf, &lv_font_montserrat_48, over ? lv_color_hex(0xF28B82) : lv_color_white(),
+              HALF, 236, 220);
+    draw_text(layer, nav_view_mph() ? "mph" : "km/h", &lv_font_montserrat_20, lv_color_white(),
+              HALF, 280, 120);
+
+    // A pill like the reference's: during a drive how far is left, otherwise
+    // the compass heading the phone reports.
+    int rem = nav_view_remaining_m();
+    if (rem >= 0 || live) {
+        if (rem < 0) {
+            static const char *const pts[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+            int deg = (s_cog_cdeg + 50) / 100 % 360;
+            lv_snprintf(buf, sizeof(buf), "%s  %d\xC2\xB0", pts[(deg * 2 + 45) / 90 % 8], deg);
+        } else if (nav_view_mph()) {
+            lv_snprintf(buf, sizeof(buf), "%d.%d mi left", rem / 1609, (rem % 1609) * 10 / 1609);
+        } else {
+            lv_snprintf(buf, sizeof(buf), "%d.%d km left", rem / 1000, (rem % 1000) / 100);
+        }
+        lv_draw_rect_dsc_t pill;
+        lv_draw_rect_dsc_init(&pill);
+        pill.radius = LV_RADIUS_CIRCLE;
+        pill.bg_opa = LV_OPA_TRANSP;
+        pill.border_color = lv_color_white();
+        pill.border_width = 2;
+        pill.border_opa = LV_OPA_COVER;
+        lv_area_t a = {HALF - 95, 322, HALF + 95, 362};
+        lv_draw_rect(layer, &pill, &a);
+        draw_text(layer, buf, &lv_font_montserrat_20, lv_color_white(), HALF, 342, 180);
+    }
+}
+
+// What the speedometer shows, folded into one number: a change means redraw.
+static int32_t speedo_key(void)
+{
+    int rem = nav_view_remaining_m();
+    uint32_t k = (uint32_t)(fix_is_live() ? speed_units() + 1 : 0);  // 0..~250
+    k = k * 257u + nav_view_limit();
+    k = k * 2u + (nav_view_mph() ? 1u : 0u);
+    // Distance left in 100 m steps, or the heading in whole degrees.
+    k = k * 1024u + (uint32_t)(rem < 0 ? 600 + (s_cog_cdeg + 50) / 100 % 360 : (rem / 100) % 600);
+    return (int32_t)(k & 0x7FFFFFFFu);
+}
+
+static void draw_progress(lv_layer_t *layer)
+{
+    int p = nav_view_progress_permille();
+    s_prog_shown = p;
+    if (p < 0) return;
+    lv_draw_arc_dsc_t a;
+    lv_draw_arc_dsc_init(&a);
+    a.center.x = HALF;
+    a.center.y = HALF;
+    a.opa = LV_OPA_COVER;
+    a.radius = PROG_R - 2;
+    a.width = 3;
+    a.color = lv_color_hex(0x5F6368);
+    a.start_angle = PROG_A0;
+    a.end_angle = PROG_A1;
+    lv_draw_arc(layer, &a);
+    if (p > 0) {
+        a.radius = PROG_R;
+        a.width = 7;
+        a.rounded = 1;
+        a.color = lv_color_white();
+        a.start_angle = PROG_A1 - (PROG_A1 - PROG_A0) * p / 1000;
+        lv_draw_arc(layer, &a);
+    }
+}
+
+// Where the marker is along the route: segment index (points seg, seg + 1)
+// and the fraction of that segment already covered. Found per frame in screen
+// space, near the last answer first so a route that doubles back on itself
+// cannot jump ahead to its return leg.
+static int s_route_seg;
+static float s_route_t;
+
+// Nearest point on segments [lo, hi] to (mx, my). Returns the squared distance.
+static float route_nearest(const int32_t *rx, const int32_t *ry, int lo, int hi, float mx, float my,
+                           int *seg, float *frac)
+{
+    float best = 1e30f;
+    for (int k = lo; k <= hi; k++) {
+        float ax = rx[k], ay = ry[k];
+        float dx = rx[k + 1] - ax, dy = ry[k + 1] - ay;
+        float len2 = dx * dx + dy * dy;
+        float t = len2 < 1e-3f ? 0.0f : ((mx - ax) * dx + (my - ay) * dy) / len2;
+        t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+        float ex = ax + dx * t - mx, ey = ay + dy * t - my;
+        float d2 = ex * ex + ey * ey;
+        if (d2 < best) {
+            best = d2;
+            *seg = k;
+            *frac = t;
+        }
+    }
+    return best;
+}
+
+#define ROUTE_NEAR_PX 70.0f    // on the line: keep following it forward
+#define ROUTE_LOST_PX 160.0f   // further than this from every segment: leave the split alone
+
+static void route_locate(const int32_t *rx, const int32_t *ry)
+{
+    if (!s_has_fix) return;
+    int32_t mx, my;
+    marker_screen(s_f_ox, s_f_oy, s_f_rot, &mx, &my);
+    int last = s_route_n - 2;
+    int lo = s_route_seg - 2, hi = s_route_seg + 40;
+    if (lo < 0) lo = 0;
+    if (hi > last) hi = last;
+    int seg = s_route_seg;
+    float t = s_route_t;
+    float d2 = route_nearest(rx, ry, lo, hi, mx, my, &seg, &t);
+    if (d2 > ROUTE_NEAR_PX * ROUTE_NEAR_PX) {
+        d2 = route_nearest(rx, ry, 0, last, mx, my, &seg, &t);
+        if (d2 > ROUTE_LOST_PX * ROUTE_LOST_PX) return;
+    }
+    s_route_seg = seg;
+    s_route_t = t;
+}
+
+static void route_seg(lv_layer_t *layer, lv_draw_line_dsc_t *d, float ax, float ay, float bx, float by)
+{
+    // Cull segments fully outside the (expanded) round viewport; a long route
+    // is mostly off-screen at street zoom.
+    float minx = ax < bx ? ax : bx, maxx = ax > bx ? ax : bx;
+    float miny = ay < by ? ay : by, maxy = ay > by ? ay : by;
+    if (maxx < -60 || minx > BOARD_LCD_W + 60 || maxy < -60 || miny > BOARD_LCD_H + 60) return;
+    d->p1.x = ax;
+    d->p1.y = ay;
+    d->p2.x = bx;
+    d->p2.y = by;
+    lv_draw_line(layer, d);
+}
+
+static void draw_route(lv_layer_t *layer)
+{
+    if (!s_route_active || s_route_n < 2) return;
+
+    static int32_t rx[ROUTE_MAX], ry[ROUTE_MAX];
+    for (int i = 0; i < s_route_n; i++) {
+        world_screen(lon_to_nx(s_route_lon[i] / 1e7), lat_to_ny(s_route_lat[i] / 1e7),
+                     s_f_ox, s_f_oy, s_f_rot, &rx[i], &ry[i]);
+    }
+    if (s_route_seg > s_route_n - 2) s_route_seg = 0, s_route_t = 0.0f;
+    route_locate(rx, ry);
+    int seg = s_route_seg;
+    // The point reached, where the line changes from covered to still ahead.
+    float px = rx[seg] + (rx[seg + 1] - rx[seg]) * s_route_t;
+    float py = ry[seg] + (ry[seg + 1] - ry[seg]) * s_route_t;
+
+    bool dark = dark_bg();
+    lv_draw_line_dsc_t d;
+    lv_draw_line_dsc_init(&d);
+    d.round_start = 1;
+    d.round_end = 1;
+    // Two passes: a dark/white casing under a blue fill, so the line reads over
+    // both road-coloured and water-coloured tiles. The minimal display has
+    // nothing under the line, so it is one pass: a wide white stroke.
+    // In each pass the part already covered goes down first, in grey, so the
+    // part ahead overlaps it where they meet.
+    for (int pass = s_minimal ? 1 : 0; pass < 2; pass++) {
+        d.width = s_minimal ? ROUTE_W_MINI : pass == 0 ? ROUTE_CASING : ROUTE_W;
+        d.opa = pass == 0 ? LV_OPA_70 : LV_OPA_COVER;
+        lv_color_t casing = lv_color_hex(dark ? 0x0B0F14 : 0xFFFFFF);
+        d.color = pass == 0 ? casing
+                  : lv_color_hex(s_minimal ? COL_DONE_MINI : dark ? COL_DONE_D : COL_DONE_L);
+        for (int k = 0; k < seg; k++) route_seg(layer, &d, rx[k], ry[k], rx[k + 1], ry[k + 1]);
+        route_seg(layer, &d, rx[seg], ry[seg], px, py);
+
+        d.color = pass == 0 ? casing
+                  : s_minimal ? lv_color_white() : lv_color_hex(dark ? COL_ROUTE_D : COL_ROUTE_L);
+        route_seg(layer, &d, px, py, rx[seg + 1], ry[seg + 1]);
+        for (int k = seg + 1; k < s_route_n - 1; k++) {
+            route_seg(layer, &d, rx[k], ry[k], rx[k + 1], ry[k + 1]);
+        }
+    }
+}
+
 typedef struct {
     int32_t tx, ty;
     int d;
 } vis_tile_t;
-
-// Origin + rotation used by the frame being rendered (blit + marker agree).
-static int32_t s_f_ox, s_f_oy;
-static float s_f_rot;
 static int32_t s_r_rot;  // rotation of the last render, 0.1 deg units
 
 // Placeholder colour for tiles that are not drawable yet. Follows the theme
@@ -601,6 +1019,167 @@ static void render_rotated(uint8_t *fb, uint32_t stride, float rot)
     if (s_helper) xSemaphoreTake(s_job_done, pdMS_TO_TICKS(200));
 }
 
+// Black background for the minimal display. The frame buffers live in PSRAM,
+// and so does the one the panel is scanning out: its interrupt copies that
+// into a small internal buffer a few lines ahead of the beam. One 460 KB
+// memset is the densest write PSRAM can be given, and it held that copy up
+// long enough for the picture to tear and jump. So the clear goes in bands of
+// about one of those copies each, with a pause after every band.
+#define CLEAR_BAND_ROWS 16
+#define CLEAR_GAP_US 250
+
+static void clear_black(uint8_t *fb, uint32_t stride)
+{
+    for (int y = 0; y < BOARD_LCD_H; y++) {
+        // Whole rows: skipping the corners left old pixels showing as a pale
+        // rim, because things drawn near the edge reach past the disc the map
+        // renderer treats as visible.
+        memset(fb + (size_t)y * stride, 0, (size_t)BOARD_LCD_W * 2);
+        if (y % CLEAR_BAND_ROWS == CLEAR_BAND_ROWS - 1) esp_rom_delay_us(CLEAR_GAP_US);
+    }
+}
+
+// ---- nearby streets (minimal display) ----
+// Points are kept as offsets from the set's origin in normalized world units:
+// small numbers, so floats hold them exactly enough, where a float holding a
+// whole-world coordinate would be a couple of pixels out at this zoom.
+#define ROADS_MAX_PTS 1600
+#define ROADS_MAX_LINES 240
+#define COL_ROAD_MINOR 0x2B2F34
+#define COL_ROAD_MAJOR 0x474C53
+
+typedef struct {
+    uint16_t first, n;
+    uint8_t cls;
+} road_line_t;
+
+typedef struct {
+    double onx, ony;      // origin, normalized world
+    float *dx, *dy;       // ROADS_MAX_PTS each
+    road_line_t *lines;   // ROADS_MAX_LINES
+    int n_pts, n_lines;
+} road_set_t;
+
+// Two sets: the one drawn, and the one being received.
+static road_set_t s_roads[2];
+static int s_roads_live;        // index of the set drawn
+static bool s_roads_ok;         // buffers allocated
+static bool s_roads_bad = true; // the set being received has a gap: ignore it
+static uint8_t s_roads_seq;
+static int32_t s_roads_olat, s_roads_olon;
+
+static bool roads_alloc(void)
+{
+    if (s_roads_ok) return true;
+    for (int i = 0; i < 2; i++) {
+        s_roads[i].dx = malloc(ROADS_MAX_PTS * sizeof(float));
+        s_roads[i].dy = malloc(ROADS_MAX_PTS * sizeof(float));
+        s_roads[i].lines = malloc(ROADS_MAX_LINES * sizeof(road_line_t));
+        if (!s_roads[i].dx || !s_roads[i].dy || !s_roads[i].lines) return false;
+    }
+    s_roads_ok = true;
+    return true;
+}
+
+void map_view_roads_chunk(const uint8_t *data, size_t len)
+{
+    if (len < NAV_ROADS_HDR || data[0] != NAV_ROADS || !roads_alloc()) return;
+    road_set_t *in = &s_roads[1 - s_roads_live];
+    uint8_t flags = data[1];
+    size_t o = NAV_ROADS_HDR;
+    if (flags & NAV_ROADS_F_START) {
+        if (len < NAV_ROADS_HDR + 8) return;
+        memcpy(&s_roads_olat, data + 4, 4);
+        memcpy(&s_roads_olon, data + 8, 4);
+        o += 8;
+        in->onx = lon_to_nx(s_roads_olon / 1e7);
+        in->ony = lat_to_ny(s_roads_olat / 1e7);
+        in->n_pts = in->n_lines = 0;
+        s_roads_seq = 0;
+        s_roads_bad = false;
+    }
+    if (s_roads_bad) return;
+    if (data[2] != s_roads_seq) {
+        s_roads_bad = true;
+        return;
+    }
+    s_roads_seq++;
+    while (o + 2 <= len) {
+        int n = data[o], cls = data[o + 1];
+        o += 2;
+        if (n < 2 || o + (size_t)n * 4 > len) {
+            s_roads_bad = true;
+            return;
+        }
+        bool room = in->n_lines < ROADS_MAX_LINES && in->n_pts + n <= ROADS_MAX_PTS;
+        if (room) in->lines[in->n_lines++] = (road_line_t){(uint16_t)in->n_pts, (uint16_t)n, (uint8_t)cls};
+        for (int i = 0; i < n; i++, o += 4) {
+            if (!room) continue;  // over budget: skip the line, keep parsing
+            int16_t dlat, dlon;
+            memcpy(&dlat, data + o, 2);
+            memcpy(&dlon, data + o + 2, 2);
+            in->dx[in->n_pts] = (float)(lon_to_nx((s_roads_olon + dlon * 100) / 1e7) - in->onx);
+            in->dy[in->n_pts] = (float)(lat_to_ny((s_roads_olat + dlat * 100) / 1e7) - in->ony);
+            in->n_pts++;
+        }
+    }
+    if (flags & NAV_ROADS_F_END) {
+        s_roads_live = 1 - s_roads_live;
+        s_roads_bad = true;  // nothing more is expected until the next START
+        invalidate();
+    }
+}
+
+// One thick line straight into the frame buffer. Not anti-aliased: these are
+// dim background lines, and there can be a few hundred of them per frame,
+// which LVGL's line drawing is far too slow for.
+static void fb_line(uint8_t *fb, uint32_t stride, int x0, int y0, int x1, int y1, uint16_t col, int w)
+{
+    int minx = x0 < x1 ? x0 : x1, maxx = x0 > x1 ? x0 : x1;
+    int miny = y0 < y1 ? y0 : y1, maxy = y0 > y1 ? y0 : y1;
+    if (maxx < 0 || minx >= BOARD_LCD_W || maxy < 0 || miny >= BOARD_LCD_H) return;
+    // A segment that starts far off screen would walk a long way for nothing.
+    if (maxx - minx > 4000 || maxy - miny > 4000) return;
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy, h = w / 2;
+    for (;;) {
+        if (x0 >= h && x0 < BOARD_LCD_W - h && y0 >= h && y0 < BOARD_LCD_H - h) {
+            for (int yy = y0 - h; yy <= y0 + h; yy++) {
+                uint16_t *p = (uint16_t *)(fb + (size_t)yy * stride) + (x0 - h);
+                for (int k = 0; k < w; k++) p[k] = col;
+            }
+        }
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) err += dy, x0 += sx;
+        if (e2 <= dx) err += dx, y0 += sy;
+    }
+}
+
+static void draw_roads(uint8_t *fb, uint32_t stride)
+{
+    if (!s_roads_ok) return;
+    const road_set_t *rs = &s_roads[s_roads_live];
+    if (!rs->n_lines) return;
+    double w = world_px();
+    float r = s_f_rot * (float)M_PI / 180.0f, c = cosf(r), sn = sinf(r), wf = (float)w;
+    // The origin's offset from the view centre, in pixels, before rotation.
+    float bx = (float)((rs->onx - s_cx) * w), by = (float)((rs->ony - s_cy) * w);
+    uint16_t minor = lv_color_to_u16(lv_color_hex(COL_ROAD_MINOR));
+    uint16_t major = lv_color_to_u16(lv_color_hex(COL_ROAD_MAJOR));
+    for (int l = 0; l < rs->n_lines; l++) {
+        const road_line_t *ln = &rs->lines[l];
+        int px = 0, py = 0;
+        for (int i = 0; i < ln->n; i++) {
+            float wx = bx + rs->dx[ln->first + i] * wf, wy = by + rs->dy[ln->first + i] * wf;
+            int x = (int)lroundf(239.5f + wx * c + wy * sn), y = (int)lroundf(239.5f - wx * sn + wy * c);
+            if (i) fb_line(fb, stride, px, py, x, y, ln->cls ? major : minor, ln->cls ? 5 : 3);
+            px = x, py = y;
+        }
+    }
+}
+
 // Paints the whole map straight into the frame buffer LVGL is about to
 // render. Tight row memcpy from the tile cache: no LVGL image pipeline, no
 // background fill underneath. LVGL then draws the marker + widgets on top.
@@ -617,6 +1196,12 @@ static void render_start_cb(lv_event_t *e)
     s_f_ox = ox;
     s_f_oy = oy;
     s_f_rot = s_rot;
+    if (s_minimal) {
+        // No tiles: nothing is read from the SD card in this mode.
+        clear_black(fb, stride);
+        if (!s_speedo) draw_roads(fb, stride);
+        return;
+    }
     tiles_begin_frame();
     if (rotated(s_f_rot)) {
         render_rotated(fb, stride, s_f_rot);
@@ -675,15 +1260,40 @@ static void draw_cb(lv_event_t *e)
     lv_layer_t *layer = lv_event_get_layer(e);
     int32_t sx = 0, sy = 0;
     bool have_sx = false;
+    if (s_minimal && s_speedo) {
+        s_speedo_key = speedo_key();
+        draw_speedo(layer);
+        s_r_valid = true;
+        return;
+    }
     if (s_has_fix) {
         marker_screen(s_f_ox, s_f_oy, s_f_rot, &sx, &sy);
         have_sx = true;
     }
-    // Suggested route: a marching dotted line from us to the destination,
-    // drawn first so both markers sit on top. The phase advances one step per
-    // rendered frame (not wall-clock): tying it to now_ms() made the pattern
-    // jitter, because draw timing is independent of the tick that invalidates.
-    if (s_has_dest && have_sx) {
+    // Valhalla route geometry, when present: the real line, drawn first so
+    // both markers sit on top. Otherwise a suggested dotted line from us to
+    // the destination (the only thing possible before Valhalla, since OsmAnd
+    // exposed no geometry). The phase advances one step per rendered frame
+    // (not wall-clock): tying it to now_ms() made the pattern jitter.
+    bool route_on = s_route_active && s_route_n >= 2;
+    if (route_on) draw_route(layer);
+    if (s_minimal) {
+        // While a turn is showing, a translucent black band from just above it
+        // to the bottom of the screen, over the route so the text reads
+        // cleanly, and under the progress arc so that stays bright.
+        if (nav_view_active()) {
+            lv_draw_rect_dsc_t band;
+            lv_draw_rect_dsc_init(&band);
+            band.bg_color = lv_color_black();
+            band.bg_opa = LV_OPA_70;
+            lv_area_t a = {0, nav_view_banner_top() - 6, BOARD_LCD_W - 1, BOARD_LCD_H - 1};
+            lv_draw_rect(layer, &band, &a);
+        }
+        draw_progress(layer);
+        // Right of the arrow, above the turn banner.
+        draw_limit_sign(layer, 392, 284, 32, &lv_font_montserrat_20);
+    }
+    if (s_has_dest && have_sx && !route_on) {
         int32_t dx, dy;
         world_screen(s_dnx, s_dny, s_f_ox, s_f_oy, s_f_rot, &dx, &dy);
         s_line_phase += LINK_STEP;
@@ -777,19 +1387,26 @@ static void update_status(void)
 static void update_buttons(void)
 {
     if (!s_map) return;
-    if (s_zoom >= s_zmax) {
+    if (s_zoom >= zoom_max()) {
         lv_obj_add_state(s_btn_in, LV_STATE_DISABLED);
     } else {
         lv_obj_remove_state(s_btn_in, LV_STATE_DISABLED);
     }
-    if (s_zoom <= s_zmin) {
+    if (s_zoom <= zoom_min()) {
         lv_obj_add_state(s_btn_out, LV_STATE_DISABLED);
     } else {
         lv_obj_remove_state(s_btn_out, LV_STATE_DISABLED);
     }
     // Recentre only matters while browsing; during navigation the banner owns
     // that area of the screen.
-    lv_obj_set_hidden(s_btn_center, s_follow || nav_view_active());
+    // The minimal display has no buttons and cannot be dragged or zoomed. A
+    // long press brings the map and its buttons back. The speedometer also
+    // drops the status pill, which would sit on its scale.
+    lv_obj_set_hidden(s_btn_center, s_minimal || s_follow || nav_view_active());
+    lv_obj_set_hidden(s_pill, s_minimal && s_speedo);
+    lv_obj_set_hidden(s_btn_in, s_minimal);
+    lv_obj_set_hidden(s_btn_out, s_minimal);
+    lv_obj_set_hidden(s_btn_media, s_minimal);
 }
 
 static void show_toast(const char *txt)
@@ -804,8 +1421,8 @@ static void show_toast(const char *txt)
 
 static void apply_zoom(int z, int ax, int ay)
 {
-    if (z < s_zmin) z = s_zmin;
-    if (z > s_zmax) z = s_zmax;
+    if (z < zoom_min()) z = zoom_min();
+    if (z > zoom_max()) z = zoom_max();
     if (z == s_zoom) return;
     if (!s_follow) {
         // Keep the point under the anchor (pinch centre) fixed on screen.
@@ -822,9 +1439,12 @@ static void apply_zoom(int z, int ax, int ay)
     } else {
         s_zoom = z;
     }
-    tiles_set_active_zoom(z);
-    s_zoom_dirty = true;
-    s_zoom_changed_ms = now_ms();
+    if (!s_minimal) {
+        // The saved zoom and the tile cache belong to the map.
+        tiles_set_active_zoom(z);
+        s_zoom_dirty = true;
+        s_zoom_changed_ms = now_ms();
+    }
     update_buttons();
     invalidate();
 }
@@ -850,6 +1470,16 @@ void map_view_recenter(void)
 
 // ---------------------------------------------------------------- input
 
+static void set_speedo(bool on)
+{
+    if (on == s_speedo) return;
+    s_speedo = on;
+    s_speedo_key = -1;
+    nav_view_set_suppressed(on);
+    update_buttons();
+    invalidate();
+}
+
 static void map_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -858,10 +1488,49 @@ static void map_event_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         lv_indev_get_point(indev, &s_last_pt);
+        s_press_pt = s_last_pt;
         s_drag_acc = 0;
         s_dragging = s_pinching = s_pinch_done = false;
+        s_press_t0 = now_ms();
+        s_press_fired = false;
+    } else if (s_minimal) {
+        // No dragging and no zooming here. Three gestures only: hold still to
+        // go back to the map, and swipe right or left to change face.
+        lv_point_t p;
+        lv_indev_get_point(indev, &p);
+        int32_t dx = p.x - s_press_pt.x, dy = p.y - s_press_pt.y;
+        if (code == LV_EVENT_PRESSING) {
+            if (!s_press_fired && s_press_t0 && abs(dx) + abs(dy) < DRAG_SLOP_PX * 2 &&
+                touch_get()->n < 2 && now_ms() - s_press_t0 >= MODE_HOLD_MS) {
+                s_press_fired = true;
+                s_mode_req = true;
+            }
+        } else if (code == LV_EVENT_RELEASED && !s_press_fired) {
+            if (abs(dx) >= SWIPE_MIN_PX && abs(dx) > 2 * abs(dy)) {
+                // The faces sit in a row: music, route, speedometer. Swiping
+                // right moves towards the speedometer and left towards the
+                // music controls. With no drive running the route face has
+                // nothing on it, so it is skipped.
+                if (dx > 0) {
+                    s_speedo_pref = 1;
+                    set_speedo(true);
+                } else if (s_speedo && nav_view_active()) {
+                    s_speedo_pref = 0;
+                    set_speedo(false);
+                } else if (s_media_cb) {
+                    s_media_cb();  // only asks for the screen; main.c switches later
+                }
+            }
+        }
+        return;
     } else if (code == LV_EVENT_PRESSING) {
         const touch_sample_t *t = touch_get();
+        // A finger held still switches between the map and the minimal display.
+        if (t->n < 2 && !s_dragging && !s_pinching && !s_press_fired && s_press_t0 &&
+            now_ms() - s_press_t0 >= MODE_HOLD_MS) {
+            s_press_fired = true;
+            s_mode_req = true;
+        }
         if (t->n >= 2) {
             float dx = t->x[1] - t->x[0], dy = t->y[1] - t->y[0];
             float d = sqrtf(dx * dx + dy * dy);
@@ -1090,7 +1759,7 @@ void map_view_create(lv_obj_t *parent)
     s_btn_in = ui_round_button(parent, LV_SYMBOL_PLUS, 410, 200, 58, f, zoom_in_cb);
     s_btn_out = ui_round_button(parent, LV_SYMBOL_MINUS, 410, 280, 58, f, zoom_out_cb);
     s_btn_center = ui_round_button(parent, LV_SYMBOL_GPS, HALF, 410, 58, f, center_cb);
-    ui_round_button(parent, LV_SYMBOL_AUDIO, 70, 240, 58, f, media_btn_cb);
+    s_btn_media = ui_round_button(parent, LV_SYMBOL_AUDIO, 70, 240, 58, f, media_btn_cb);
 
     s_toast = lv_label_create(parent);
     lv_obj_set_style_bg_color(s_toast, lv_color_hex(0x202124), 0);
@@ -1103,7 +1772,7 @@ void map_view_create(lv_obj_t *parent)
     lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, 66);
     lv_obj_set_hidden(s_toast, true);
 
-    if (!tiles_zoom_min()) {
+    if (!tiles_zoom_min() && !s_minimal) {
         lv_obj_t *msg = lv_label_create(parent);
         lv_label_set_text(msg, sdcard_ok() ? "No map tiles found in\n/sdcard/street_map"
                                            : "No SD card\nInsert the map card and restart");
@@ -1128,7 +1797,7 @@ void map_view_destroy(void)
     if (s_map) lv_display_remove_event_cb_with_user_data(display_get(), render_start_cb, NULL);
     // Objects are deleted by the caller cleaning the screen.
     s_map = s_pill = s_pill_dot = s_pill_lbl = NULL;
-    s_btn_in = s_btn_out = s_btn_center = s_toast = NULL;
+    s_btn_in = s_btn_out = s_btn_center = s_btn_media = s_toast = NULL;
     s_r_valid = false;
 }
 
@@ -1195,6 +1864,44 @@ void map_view_set_dest(bool valid, int32_t lat_e7, int32_t lon_e7)
     invalidate();
 }
 
+// ---- route line ----------------------------------------------------------
+
+void map_view_route_reset(void)
+{
+    s_route_n = 0;
+    s_route_active = false;
+}
+
+void map_view_route_add(const int32_t *lat_e7, const int32_t *lon_e7, int n)
+{
+    for (int i = 0; i < n && s_route_n < ROUTE_MAX; i++) {
+        s_route_lat[s_route_n] = lat_e7[i];
+        s_route_lon[s_route_n] = lon_e7[i];
+        s_route_n++;
+    }
+}
+
+void map_view_route_commit(void)
+{
+    s_route_active = s_route_n >= 2;
+    s_route_seg = 0;  // a new line: start looking from its beginning
+    s_route_t = 0.0f;
+    invalidate();
+}
+
+void map_view_route_clear(void)
+{
+    if (!s_route_active && s_route_n == 0) return;
+    s_route_n = 0;
+    s_route_active = false;
+    invalidate();
+}
+
+bool map_view_route_active(void)
+{
+    return s_route_active && s_route_n >= 2;
+}
+
 void map_view_flush_state(void)
 {
     if (s_pos_dirty && s_has_fix) {
@@ -1238,15 +1945,37 @@ void map_view_tick(void)
         s_mx = s_ax + (s_bx - s_ax) * k;
         s_my = s_ay + (s_by - s_ay) * k;
     }
+    if (s_minimal) {
+        // Pull back as a turn comes up, and close in again once it is behind.
+        int d = nav_view_dist_m();
+        if (d < 0 || d > TURN_FAR_M) s_turn_near = false;
+        else if (d <= TURN_NEAR_M) s_turn_near = true;
+        double target = s_turn_near ? TURN_SCALE : CRUISE_SCALE;
+        float dts = (t - s_scale_t) / 1000.0f;
+        s_scale_t = t;
+        if (dts > 0.1f) dts = 0.1f;
+        if (fabs(target - s_scale) < 0.002) s_scale = target;
+        else s_scale += (target - s_scale) * (1.0 - exp(-dts * SCALE_RATE));
+    }
     if (s_follow && s_has_fix) {
         s_cx = s_mx;
         s_cy = s_my;
+        if (s_minimal) {
+            // Look ahead: put the view centre MINI_AHEAD_PX up the screen from
+            // the marker, so the marker draws that far below the centre.
+            double w = world_px();
+            float r = s_rot * (float)M_PI / 180.0f;
+            s_cx = clamp01(s_mx + MINI_AHEAD_PX * sinf(r) / w);
+            s_cy = clamp01(s_my - MINI_AHEAD_PX * cosf(r) / w);
+        }
     }
 
     // Heading-up only while following a moving, live fix; otherwise ease
-    // back to north-up (which also re-enables the fast unrotated blit).
+    // back to north-up (which also re-enables the fast unrotated blit). The
+    // minimal display stays heading-up while stopped: it has no tiles to blit,
+    // and a route that swings round at every red light is hard to read.
     {
-        bool heading_up = s_follow && s_has_fix && fix_is_live() && s_moving;
+        bool heading_up = s_follow && s_has_fix && fix_is_live() && (s_moving || s_minimal);
         float target = heading_up ? (float)s_cog_cdeg / 100.0f : 0.0f;
         float d = wrap180(target - s_rot);
         float dt = (t - s_rot_t) / 1000.0f;
@@ -1262,8 +1991,10 @@ void map_view_tick(void)
     bool nav_on = nav_view_active();
     if (nav_on != s_was_nav) {
         s_was_nav = nav_on;
+        s_speedo_pref = -1;  // a drive started or ended: back to the automatic face
         update_buttons();
     }
+    if (s_minimal) set_speedo(s_speedo_pref >= 0 ? s_speedo_pref == 1 : !nav_on);
     nav_view_tick();  // staleness must hide the banner even without a stop message
     // Cheap: update_status() early-returns unless the state or ETA minute
     // changed. Needed here so the ETA counts down while everything else is
@@ -1292,6 +2023,15 @@ void map_view_tick(void)
 
     // Both change the screen (or power off), so they run here rather than
     // inside the pill's event callback.
+    if (s_mode_req) {
+        s_mode_req = false;
+        if (s_mode_cb) s_mode_cb();
+    }
+    if (s_minimal && s_speedo) {
+        if (speedo_key() != s_speedo_key) lv_obj_invalidate(s_map);
+    } else if (s_minimal && nav_view_progress_permille() != s_prog_shown) {
+        lv_obj_invalidate(s_map);
+    }
     if (s_sleep_req) {
         s_sleep_req = false;
         if (s_sleep_cb) s_sleep_cb();
@@ -1303,7 +2043,13 @@ void map_view_tick(void)
         return;
     }
 
-    if (loaded) {
+    if (s_minimal && s_speedo) {
+        // The speedometer redraws only when a figure on it changes (the key
+        // check above). The map's own triggers below follow the view origin,
+        // the marker and the destination line, none of which it draws: left
+        // on, they repainted the whole screen on every pass while moving,
+        // faster than the panel swaps buffers, which showed as flicker.
+    } else if (loaded) {
         invalidate();
     } else {
         int32_t ox, oy, sx = 0, sy = 0;
@@ -1321,7 +2067,7 @@ void map_view_tick(void)
         }
     }
 
-    if (t - s_prefetch_ms > PREFETCH_MS) {
+    if (!s_minimal && t - s_prefetch_ms > PREFETCH_MS) {
         s_prefetch_ms = t;
         prefetch_ring();
     }
@@ -1329,4 +2075,30 @@ void map_view_tick(void)
         s_toast_until = 0;
         lv_obj_set_hidden(s_toast, true);
     }
+}
+
+void map_view_set_minimal(bool on)
+{
+    if (on == s_minimal) return;
+    // Each mode keeps its own zoom; swap them.
+    int z = s_zoom;
+    s_zoom = s_zoom_other;
+    s_zoom_other = z;
+    s_minimal = on;
+    if (!on) tiles_set_active_zoom(s_zoom);
+    s_prog_shown = -2;
+    s_scale = on ? CRUISE_SCALE : 1.0;
+    s_turn_near = false;
+    s_follow = true;  // nothing can drag the minimal display off the marker
+    s_speedo = false;
+    s_speedo_pref = -1;
+    nav_view_set_suppressed(false);
+    map_view_recenter();
+    update_buttons();
+    invalidate();
+}
+
+void map_view_set_mode_cb(void (*cb)(void))
+{
+    s_mode_cb = cb;
 }
