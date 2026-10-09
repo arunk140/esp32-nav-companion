@@ -715,21 +715,10 @@ static void enter_deep_sleep(void)
 {
     if (s_sleep_pending) return;
     s_sleep_pending = true;
-    s_sleep_at = now_ms() + SLEEP_INDICATOR_MS;
+    s_sleep_at = now_ms() + BOOT_VIEW_SLEEP_MS;
 
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_t *dim = lv_obj_create(scr);
-    lv_obj_remove_style_all(dim);
-    lv_obj_set_size(dim, BOARD_LCD_W, BOARD_LCD_H);
-    lv_obj_center(dim);
-    lv_obj_set_style_bg_color(dim, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(dim, LV_OPA_80, 0);
-    lv_obj_set_clickable(dim, false);
-    lv_obj_t *msg = lv_label_create(dim);
-    lv_label_set_text(msg, "Sleeping...");
-    lv_obj_set_style_text_font(msg, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(msg, lv_color_white(), 0);
-    lv_obj_center(msg);
+    // The start-up animation run backwards, over whatever is showing.
+    boot_view_play_sleep(lv_screen_active(), settings_device_name());
     ESP_LOGW(TAG, "sleeping");
 }
 

@@ -28,6 +28,12 @@ static char s_name[24];
 static void (*s_on_done)(void);
 static bool s_done;
 static bool s_started;
+static bool s_sleeping;  // run backwards, over a dimming copy of the screen
+
+// Going to sleep starts from the finished picture and runs back to nothing.
+#define T_SLEEP_FROM 1500
+#define SLEEP_SPEED 1.3f
+#define SLEEP_DIM_MS 240
 
 static inline float clamp01(float v)
 {
@@ -82,6 +88,21 @@ static void draw_cb(lv_event_t *e)
     }
     float t = (float)((esp_timer_get_time() - s_t0) / 1000) * s_speed;
     float out = 1.0f - ramp(t, T_OUT, T_END);  // everything fades together at the end
+    if (s_sleeping) {
+        // Black comes down over the screen first, and the picture comes up
+        // with it; then time runs backwards from the finished picture.
+        float elapsed = (float)((esp_timer_get_time() - s_t0) / 1000);
+        float dim = ramp(elapsed, 0, SLEEP_DIM_MS);
+        lv_draw_rect_dsc_t bg;
+        lv_draw_rect_dsc_init(&bg);
+        bg.bg_color = lv_color_black();
+        bg.bg_opa = (lv_opa_t)(255.0f * dim);
+        lv_area_t all = {0, 0, BOARD_LCD_W - 1, BOARD_LCD_H - 1};
+        lv_draw_rect(l, &bg, &all);
+        t = T_SLEEP_FROM - elapsed * SLEEP_SPEED;
+        if (t < 0.0f) return;  // nothing left: the screen stays black
+        out = dim;
+    }
 
     // The rim: a ring growing both ways from the top, its ticks appearing behind it.
     float grown = ease_out(ramp(t, 0, T_RING)) * 180.0f;
@@ -157,6 +178,11 @@ static void timer_cb(lv_timer_t *tm)
 {
     (void)tm;
     if (!s_obj) return;
+    if (s_sleeping) {
+        // Keep drawing: the caller cuts the power when its own timer says so.
+        lv_obj_invalidate(s_obj);
+        return;
+    }
     float t = s_started ? (float)((esp_timer_get_time() - s_t0) / 1000) * s_speed : 0.0f;
     if (t >= T_END) {
         if (!s_done) {
@@ -173,6 +199,7 @@ void boot_view_create(lv_obj_t *parent, bool quick, const char *name, void (*on_
     s_on_done = on_done;
     s_done = false;
     s_started = false;
+    s_sleeping = false;
     s_speed = quick ? QUICK : 1.0f;
     snprintf(s_name, sizeof(s_name), "%s", name ? name : "");
 
@@ -196,4 +223,28 @@ void boot_view_destroy(void)
     s_timer = NULL;
     s_obj = NULL;  // deleted by the caller cleaning the screen
     s_on_done = NULL;
+}
+
+void boot_view_play_sleep(lv_obj_t *parent, const char *name)
+{
+    if (s_timer) lv_timer_delete(s_timer);
+    s_on_done = NULL;
+    s_done = true;
+    s_started = false;
+    s_sleeping = true;
+    s_speed = 1.0f;
+    snprintf(s_name, sizeof(s_name), "%s", name ? name : "");
+
+    // On top of everything, and taking the touches: nothing under it should
+    // react while the device is on its way down.
+    s_obj = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_obj);
+    lv_obj_set_size(s_obj, BOARD_LCD_W, BOARD_LCD_H);
+    lv_obj_set_pos(s_obj, 0, 0);
+    lv_obj_set_clickable(s_obj, true);
+    lv_obj_add_event_cb(s_obj, draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_move_foreground(s_obj);
+
+    s_t0 = esp_timer_get_time();
+    s_timer = lv_timer_create(timer_cb, FRAME_MS, NULL);
 }
