@@ -3,25 +3,33 @@
 #include "media_art.h"
 #include "ui_common.h"
 #include "esp_timer.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
-// Layout (480x480 round). Art centred above the middle so the transport row
-// fits below; volume and back sit where zoom and the music button are on
-// the map, so the hands already know where things are.
+// Layout (480x480 round), top to bottom: a volume arc along the upper rim,
+// the album art inside its progress ring, title and artist, then the
+// transport row. Black throughout, like the minimal display, with one colour
+// taken from the album art for the progress ring.
 #define ART_CX 240
-#define ART_CY 205
+#define ART_CY 162
 #define ART_D NAV_ART_PX
-#define PROG_D 216   // progress ring, just outside the art
-#define PROG_W 4
-#define VOL_D 262    // volume arc, outside the progress ring
-#define VOL_W 10
-#define ROW_Y 388
+#define PROG_D 222   // progress ring, just outside the art
+#define PROG_W 5
+#define VOL_D 448    // volume arc, on the rim; its centre is the screen's
+#define VOL_W 8
+#define VOL_A0 212   // LVGL angles: 270 is the top of the screen
+#define VOL_A1 328
+#define TITLE_Y 288
+#define ARTIST_Y 318
+#define ROW_Y 394
+#define TEXT_W 290
 
-#define COL_TRACK 0x2A2F36
-#define COL_PROG 0xE8EAED
-#define COL_VOL 0x2A6FDB
-#define COL_TEXT 0xB0B8C0
+#define COL_TRACK 0x24282D
+#define COL_PROG 0xE8EAED    // progress ring until the art gives a colour
+#define COL_VOL 0xE8EAED
+#define COL_TEXT 0x9AA0A6
+#define COL_GHOST 0xE8EAED   // icons of the buttons that have no disc
 
 #define VOL_SEND_MS 120      // throttle while dragging the arc
 #define VOL_HOLD_MS 1500     // ignore phone volume echo after a local change
@@ -42,7 +50,8 @@ static bool s_vol_dragging;
 
 // ---- UI (valid while the page exists) ----
 static lv_obj_t *s_root, *s_img, *s_placeholder, *s_prog, *s_vol, *s_msg;
-static lv_obj_t *s_btn_play, *s_lbl_play, *s_btn_prev, *s_btn_next, *s_btn_up, *s_btn_dn;
+static lv_obj_t *s_btn_play, *s_lbl_play, *s_btn_prev, *s_btn_next;
+static uint16_t s_accent_for;  // art id the ring colour was taken from
 static void (*s_on_back)(void);
 static void (*s_change_cb)(void);
 static uint16_t s_seen_art;
@@ -128,10 +137,10 @@ void media_view_set_text(const char *title, const char *artist)
     sanitise(s_title, sizeof(s_title), title);
     sanitise(s_artist, sizeof(s_artist), artist);
     if (!s_lbl_title) return;
-    char t[32], a[32];
-    chop(t, sizeof(t), s_title, 25);
-    chop(a, sizeof(a), s_artist, 25);
-    lv_label_set_text(s_lbl_title, t);
+    // The title scrolls when it is too long for its line; the artist is cut.
+    char a[40];
+    chop(a, sizeof(a), s_artist, 30);
+    lv_label_set_text(s_lbl_title, s_title);
     lv_label_set_text(s_lbl_artist, a);
 }
 
@@ -140,11 +149,44 @@ const char *media_view_title(void)
     return s_title;
 }
 
+// One colour for the progress ring, taken from the album art: its average,
+// pushed up to a brightness that reads on black. Art with no colour to speak
+// of (greys, near-black) keeps the neutral ring.
+static lv_color_t art_accent(const lv_image_dsc_t *img)
+{
+    if (!img || img->header.cf != LV_COLOR_FORMAT_RGB565) return lv_color_hex(COL_PROG);
+    const uint16_t *px = (const uint16_t *)img->data;
+    uint32_t n = (uint32_t)img->header.w * img->header.h;
+    uint32_t r = 0, g = 0, b = 0, cnt = 0;
+    for (uint32_t i = 0; i < n; i += 7) {
+        uint16_t p = px[i];
+        int pr = (p >> 11) << 3, pg = ((p >> 5) & 0x3F) << 2, pb = (p & 0x1F) << 3;
+        if (pr + pg + pb < 60) continue;  // the masked corners and dark areas say nothing
+        r += pr, g += pg, b += pb, cnt++;
+    }
+    if (cnt < 50) return lv_color_hex(COL_PROG);
+    r /= cnt, g /= cnt, b /= cnt;
+    uint32_t hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    uint32_t lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    if (hi - lo < 28) return lv_color_hex(COL_PROG);
+    // Widen the gap between the channels a little, then lift the brightest to 235.
+    r = r > lo / 2 ? r - lo / 2 : 0, g = g > lo / 2 ? g - lo / 2 : 0, b = b > lo / 2 ? b - lo / 2 : 0;
+    hi -= lo / 2;
+    return lv_color_make((uint8_t)(r * 235 / hi), (uint8_t)(g * 235 / hi), (uint8_t)(b * 235 / hi));
+}
+
 static void refresh_art(void)
 {
     if (!s_root) return;
     bool show = s_art && s_have_state && s_st.art_id && s_art_id == s_st.art_id;
     if (show) lv_image_set_src(s_img, s_art);
+    if (show && s_accent_for != s_art_id) {
+        s_accent_for = s_art_id;
+        lv_obj_set_style_arc_color(s_prog, art_accent(s_art), LV_PART_INDICATOR);
+    } else if (!show && s_accent_for) {
+        s_accent_for = 0;
+        lv_obj_set_style_arc_color(s_prog, lv_color_hex(COL_PROG), LV_PART_INDICATOR);
+    }
     lv_obj_set_hidden(s_img, !show);
     lv_obj_set_hidden(s_placeholder, show);
 }
@@ -177,7 +219,7 @@ static void refresh_controls(void)
 {
     if (!s_root) return;
     bool live = controls_live();
-    lv_obj_t *ctl[] = {s_btn_play, s_btn_prev, s_btn_next, s_btn_up, s_btn_dn, s_vol};
+    lv_obj_t *ctl[] = {s_btn_play, s_btn_prev, s_btn_next, s_vol};
     for (size_t i = 0; i < sizeof(ctl) / sizeof(ctl[0]); i++) {
         if (live) {
             lv_obj_remove_state(ctl[i], LV_STATE_DISABLED);
@@ -247,18 +289,6 @@ static void next_cb(lv_event_t *e)
     nav_ble_media_cmd(NAV_MCMD_NEXT, 0);
 }
 
-static void vol_up_cb(lv_event_t *e)
-{
-    (void)e;
-    nav_ble_media_cmd(NAV_MCMD_VOL_UP, 0);
-}
-
-static void vol_dn_cb(lv_event_t *e)
-{
-    (void)e;
-    nav_ble_media_cmd(NAV_MCMD_VOL_DOWN, 0);
-}
-
 static void vol_arc_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -283,18 +313,69 @@ static void vol_arc_cb(lv_event_t *e)
 
 // ---------------------------------------------------------------- build
 
-static lv_obj_t *make_arc(lv_obj_t *parent, int d, int w, uint32_t ind_col)
+static lv_obj_t *make_arc(lv_obj_t *parent, int cx, int cy, int d, int w, uint32_t ind_col)
 {
     lv_obj_t *a = lv_arc_create(parent);
     lv_obj_set_size(a, d, d);
-    lv_obj_set_pos(a, ART_CX - d / 2, ART_CY - d / 2);
+    lv_obj_set_pos(a, cx - d / 2, cy - d / 2);
     lv_obj_set_style_arc_width(a, w, LV_PART_MAIN);
     lv_obj_set_style_arc_width(a, w, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(a, lv_color_hex(COL_TRACK), LV_PART_MAIN);
     lv_obj_set_style_arc_color(a, lv_color_hex(ind_col), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(a, true, LV_PART_MAIN);
     lv_obj_set_style_arc_rounded(a, true, LV_PART_INDICATOR);
     lv_obj_set_style_pad_all(a, 0, LV_PART_MAIN);
     return a;
+}
+
+// A round button of this page. `filled`: a white disc with a dark icon, for
+// the one main action. Otherwise only the icon, with a faint disc while it is
+// pressed, so the page stays black around the art.
+static lv_obj_t *icon_button(lv_obj_t *parent, const char *sym, int x, int y, int d,
+                             const lv_font_t *font, uint32_t icon_col, bool filled, lv_event_cb_t cb)
+{
+    lv_obj_t *b = lv_button_create(parent);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, d, d);
+    lv_obj_set_pos(b, x - d / 2, y - d / 2);
+    lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(b, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(b, filled ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(b, filled ? LV_OPA_70 : LV_OPA_20, LV_STATE_PRESSED);
+    lv_obj_set_style_opa(b, LV_OPA_30, LV_STATE_DISABLED);
+    lv_obj_set_ext_click_area(b, 8);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, sym);
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(filled ? 0x101214 : icon_col), 0);
+    lv_obj_center(l);
+    return b;
+}
+
+static lv_obj_t *text_line(lv_obj_t *parent, const lv_font_t *font, uint32_t col, int y,
+                           lv_label_long_mode_t mode)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_width(l, TEXT_W);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(l, mode);
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, y);
+    return l;
+}
+
+// A small dim icon at `deg` on the rim, marking an end of the volume arc.
+static void rim_icon(lv_obj_t *parent, const char *sym, float deg)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_label_set_text(l, sym);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(COL_TEXT), 0);
+    float a = deg * 3.14159265f / 180.0f;
+    float r = VOL_D / 2.0f - VOL_W / 2.0f;
+    lv_obj_align(l, LV_ALIGN_CENTER, (int)(cosf(a) * r), (int)(sinf(a) * r));
 }
 
 void media_view_create(lv_obj_t *parent, void (*on_back)(void))
@@ -308,19 +389,40 @@ void media_view_create(lv_obj_t *parent, void (*on_back)(void))
     lv_obj_set_scrollable(parent, false);
     s_root = parent;
 
+    // Volume: an arc along the upper rim, dragged with a thumb, quiet at the
+    // left end and loud at the right.
+    s_vol = make_arc(parent, BOARD_LCD_W / 2, BOARD_LCD_H / 2, VOL_D, VOL_W, COL_VOL);
+    lv_arc_set_bg_angles(s_vol, VOL_A0, VOL_A1);
+    lv_arc_set_range(s_vol, 0, 100);
+    lv_arc_set_value(s_vol, s_have_state ? s_st.volume : 0);
+    lv_obj_set_adv_hittest(s_vol, true);  // only the ring itself is touchable
+    lv_obj_set_ext_click_area(s_vol, 14);
+    lv_obj_set_style_bg_color(s_vol, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_vol, 5, LV_PART_KNOB);
+    lv_obj_set_style_opa(s_vol, LV_OPA_30, LV_STATE_DISABLED);
+    // A drag along the arc is sideways: it must not also count as the swipe
+    // that leaves this page.
+    lv_obj_set_gesture_bubble(s_vol, false);
+    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_PRESS_LOST, NULL);
+    rim_icon(parent, LV_SYMBOL_VOLUME_MID, VOL_A0 - 7.0f);
+    rim_icon(parent, LV_SYMBOL_VOLUME_MAX, VOL_A1 + 7.0f);
+
     // Album art (pre-rounded at decode time) + placeholder.
     s_placeholder = lv_obj_create(parent);
     lv_obj_remove_style_all(s_placeholder);
     lv_obj_set_size(s_placeholder, ART_D, ART_D);
     lv_obj_set_pos(s_placeholder, ART_CX - ART_D / 2, ART_CY - ART_D / 2);
     lv_obj_set_style_radius(s_placeholder, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(s_placeholder, lv_color_hex(COL_TRACK), 0);
+    lv_obj_set_style_bg_color(s_placeholder, lv_color_hex(0x16191D), 0);
     lv_obj_set_style_bg_opa(s_placeholder, LV_OPA_COVER, 0);
     lv_obj_set_clickable(s_placeholder, false);
     lv_obj_t *note = lv_label_create(s_placeholder);
     lv_label_set_text(note, LV_SYMBOL_AUDIO);
-    lv_obj_set_style_text_font(note, &lv_font_montserrat_40, 0);
-    lv_obj_set_style_text_color(note, lv_color_hex(0x5F6368), 0);
+    lv_obj_set_style_text_font(note, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(note, lv_color_hex(0x3C4043), 0);
     lv_obj_center(note);
 
     s_img = lv_image_create(parent);
@@ -329,69 +431,35 @@ void media_view_create(lv_obj_t *parent, void (*on_back)(void))
     lv_obj_set_hidden(s_img, true);
 
     // Progress ring: full circle from 12 o'clock, display only.
-    s_prog = make_arc(parent, PROG_D, PROG_W, COL_PROG);
+    s_prog = make_arc(parent, ART_CX, ART_CY, PROG_D, PROG_W, COL_PROG);
     lv_arc_set_rotation(s_prog, 270);
     lv_arc_set_bg_angles(s_prog, 0, 360);
     lv_arc_set_range(s_prog, 0, 360);
     lv_arc_set_value(s_prog, 0);
     lv_obj_remove_style(s_prog, NULL, LV_PART_KNOB);
     lv_obj_set_clickable(s_prog, false);
-    lv_obj_set_style_arc_rounded(s_prog, false, LV_PART_INDICATOR);
+    s_accent_for = 0;
 
-    // Volume arc: 270 deg with the gap at the bottom, draggable on the ring.
-    s_vol = make_arc(parent, VOL_D, VOL_W, COL_VOL);
-    lv_arc_set_bg_angles(s_vol, 135, 45);
-    lv_arc_set_range(s_vol, 0, 100);
-    lv_arc_set_value(s_vol, s_have_state ? s_st.volume : 0);
-    lv_obj_set_adv_hittest(s_vol, true);  // only the ring itself is touchable
-    lv_obj_set_style_bg_color(s_vol, lv_color_white(), LV_PART_KNOB);
-    lv_obj_set_style_pad_all(s_vol, 4, LV_PART_KNOB);
-    lv_obj_set_style_opa(s_vol, LV_OPA_40, LV_STATE_DISABLED);
-    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_RELEASED, NULL);
-    lv_obj_add_event_cb(s_vol, vol_arc_cb, LV_EVENT_PRESS_LOST, NULL);
-
-    const lv_font_t *f = &lv_font_montserrat_28;
-    ui_round_button(parent, LV_SYMBOL_LEFT, 70, 240, 58, f, back_cb);
-    s_btn_up = ui_round_button(parent, LV_SYMBOL_PLUS, 410, 200, 58, f, vol_up_cb);
-    s_btn_dn = ui_round_button(parent, LV_SYMBOL_MINUS, 410, 280, 58, f, vol_dn_cb);
-    s_btn_prev = ui_round_button(parent, LV_SYMBOL_PREV, 150, ROW_Y, 58, f, prev_cb);
-    s_btn_next = ui_round_button(parent, LV_SYMBOL_NEXT, 330, ROW_Y, 58, f, next_cb);
-    s_btn_play = ui_round_button(parent, LV_SYMBOL_PLAY, 240, ROW_Y, 76, &lv_font_montserrat_40, play_cb);
-    s_lbl_play = lv_obj_get_child(s_btn_play, 0);
-
-    // Title + artist sit above the art: the progress and volume rings leave
-    // no room under it. The status message takes the title's place.
-    s_lbl_title = lv_label_create(parent);
-    lv_obj_set_width(s_lbl_title, 360);
-    lv_obj_set_style_text_align(s_lbl_title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_lbl_title, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(s_lbl_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_title, lv_color_white(), 0);
-    lv_obj_align(s_lbl_title, LV_ALIGN_TOP_MID, 0, 34);
+    // Title, artist. The status message takes the title's place.
+    s_lbl_title = text_line(parent, &lv_font_montserrat_20, 0xFFFFFF, TITLE_Y, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_title, s_title);
-
-    s_lbl_artist = lv_label_create(parent);
-    lv_obj_set_width(s_lbl_artist, 360);
-    lv_obj_set_style_text_align(s_lbl_artist, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_lbl_artist, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(s_lbl_artist, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_artist, lv_color_hex(COL_TEXT), 0);
-    lv_obj_align(s_lbl_artist, LV_ALIGN_TOP_MID, 0, 55);
+    s_lbl_artist = text_line(parent, &lv_font_montserrat_14, COL_TEXT, ARTIST_Y, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_artist, s_artist);
-
-    s_msg = lv_label_create(parent);
-    lv_obj_set_width(s_msg, 380);
-    lv_obj_set_style_text_align(s_msg, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_msg, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(s_msg, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_msg, lv_color_hex(COL_TEXT), 0);
-    lv_obj_align(s_msg, LV_ALIGN_TOP_MID, 0, 34);
+    s_msg = text_line(parent, &lv_font_montserrat_14, COL_TEXT, TITLE_Y + 6, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_msg, "");
+
+    // Transport: the one white disc is play, flanked by plain icons.
+    const lv_font_t *f = &lv_font_montserrat_28;
+    s_btn_prev = icon_button(parent, LV_SYMBOL_PREV, 146, ROW_Y, 60, f, COL_GHOST, false, prev_cb);
+    s_btn_next = icon_button(parent, LV_SYMBOL_NEXT, 334, ROW_Y, 60, f, COL_GHOST, false, next_cb);
+    s_btn_play = icon_button(parent, LV_SYMBOL_PLAY, 240, ROW_Y, 76, &lv_font_montserrat_28, 0, true, play_cb);
+    s_lbl_play = lv_obj_get_child(s_btn_play, 0);
+    // Back, where the music button is on the map. A swipe right does the same.
+    icon_button(parent, LV_SYMBOL_LEFT, 52, 240, 56, &lv_font_montserrat_20, COL_TEXT, false, back_cb);
 
     s_prog_shown = -1;
     s_msg_key = -1;
+    media_view_set_text(s_title, s_artist);
     refresh_art();
     refresh_play();
     refresh_progress();
@@ -412,7 +480,7 @@ void media_view_destroy(void)
     // Objects are deleted by the caller cleaning the screen.
     s_root = s_img = s_placeholder = s_prog = s_vol = s_msg = NULL;
     s_lbl_title = s_lbl_artist = NULL;
-    s_btn_play = s_lbl_play = s_btn_prev = s_btn_next = s_btn_up = s_btn_dn = NULL;
+    s_btn_play = s_lbl_play = s_btn_prev = s_btn_next = NULL;
     s_vol_dragging = false;
 }
 

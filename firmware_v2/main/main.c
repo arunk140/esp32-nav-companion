@@ -95,6 +95,8 @@ static screen_t s_screen = SCREEN_NONE;
 // Screen changes requested from inside LVGL events are applied by the GUI
 // loop: rebuilding the screen deletes the object whose event is running.
 static screen_t s_screen_req = SCREEN_NONE;
+#define MEDIA_IDLE_BACK_MS 15000
+static uint32_t s_media_touch_ms;  // last touch while the music controls were up
 // Where to return after the call page closes (map or media page).
 static screen_t s_screen_before_call = SCREEN_MAP;
 static bool s_connected;
@@ -272,6 +274,7 @@ static void show_screen(screen_t which)
     if (which == SCREEN_PAIR) {
         ui_pair_create(scr, browse_cb);
     } else if (which == SCREEN_MEDIA) {
+        s_media_touch_ms = now_ms();  // opening it counts as touching it
         media_view_create(scr, open_map);
     } else if (which == SCREEN_CALL) {
         call_view_create(scr, call_answer_cb, call_reject_cb, call_dismiss_cb);
@@ -722,7 +725,10 @@ static void gui_task(void *arg)
         if (t - last_touch >= TOUCH_POLL_MS) {
             last_touch = t;
             touch_poll();
-            if (touch_get()->n) note_activity();
+            if (touch_get()->n) {
+                note_activity();
+                s_media_touch_ms = t;
+            }
             // Never sleep while moving: dim instead.
             if (map_view_is_moving()) note_activity();
         }
@@ -735,6 +741,12 @@ static void gui_task(void *arg)
         sleep_tick();
         map_view_tick();
         media_view_tick();
+        // During a drive the music controls are a detour: left untouched for
+        // MEDIA_IDLE_BACK_MS they give the screen back to the navigation.
+        if (s_screen == SCREEN_MEDIA && s_screen_req == SCREEN_NONE && nav_view_active() &&
+            t - s_media_touch_ms >= MEDIA_IDLE_BACK_MS) {
+            s_screen_req = SCREEN_MAP;
+        }
         if (s_screen_req != SCREEN_NONE) {
             screen_t req = s_screen_req;
             s_screen_req = SCREEN_NONE;
