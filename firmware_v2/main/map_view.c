@@ -131,12 +131,25 @@ static bool s_mode_req;
 static uint32_t s_press_t0;
 static bool s_press_fired;
 static int s_prog_shown = -2;
-static bool s_speedo;         // minimal display showing the speedometer
-// Which face the user asked for by swiping: 1 speedometer, 0 route, -1 no
-// choice. With no choice the speedometer shows whenever no drive is running,
-// since the route view has nothing to draw then. A drive starting or ending
+// The minimal display's faces, in swipe order: right goes down this list,
+// left goes back up it, and left from the first one opens the music controls.
+// The route and the arrival face only exist during a drive.
+enum { FACE_ROUTE, FACE_SPEED, FACE_ETA, FACE_PHONE, FACE_N };
+static int s_face = FACE_ROUTE;
+static bool s_speedo;         // a face other than the route is showing
+// The face the user swiped to, or -1 for no choice: then the route shows
+// during a drive and the speedometer otherwise. A drive starting or ending
 // clears the choice.
 static int s_speedo_pref = -1;
+// Trip since power-on, counted from the fixes while moving.
+static double s_trip_m;
+static uint32_t s_trip_moving_ms;
+// From the phone: battery, and local time as an epoch taken at s_clock_at.
+static int s_phone_batt = -1;
+static bool s_phone_charging;
+static uint32_t s_clock_epoch, s_clock_at;
+static bool s_clock_ok;
+static int (*s_bright_cb)(int delta);
 static bool s_turn_near;
 static uint32_t s_scale_t;
 static lv_point_t s_press_pt;
@@ -588,18 +601,18 @@ static void draw_speedo(lv_layer_t *layer)
     draw_text(layer, nav_view_mph() ? "mph" : "km/h", &lv_font_montserrat_20, lv_color_white(),
               HALF, 280, 120);
 
-    // A pill like the reference's: during a drive how far is left, otherwise
-    // the compass heading the phone reports.
-    int rem = nav_view_remaining_m();
-    if (rem >= 0 || live) {
-        if (rem < 0) {
+    // A pill like the reference's: the average speed while moving, once
+    // there is half a minute of it to average; until then the compass heading.
+    bool have_avg = s_trip_moving_ms >= 30000;
+    if (have_avg || live) {
+        if (have_avg) {
+            float cms = (float)(s_trip_m * 100.0 / (s_trip_moving_ms / 1000.0));
+            int tenths = (int)lroundf(cms * (nav_view_mph() ? 0.223694f : 0.36f));
+            lv_snprintf(buf, sizeof(buf), "avg %d.%d", tenths / 10, tenths % 10);
+        } else {
             static const char *const pts[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
             int deg = (s_cog_cdeg + 50) / 100 % 360;
             lv_snprintf(buf, sizeof(buf), "%s  %d\xC2\xB0", pts[(deg * 2 + 45) / 90 % 8], deg);
-        } else if (nav_view_mph()) {
-            lv_snprintf(buf, sizeof(buf), "%d.%d mi left", rem / 1609, (rem % 1609) * 10 / 1609);
-        } else {
-            lv_snprintf(buf, sizeof(buf), "%d.%d km left", rem / 1000, (rem % 1000) / 100);
         }
         lv_draw_rect_dsc_t pill;
         lv_draw_rect_dsc_init(&pill);
@@ -617,12 +630,14 @@ static void draw_speedo(lv_layer_t *layer)
 // What the speedometer shows, folded into one number: a change means redraw.
 static int32_t speedo_key(void)
 {
-    int rem = nav_view_remaining_m();
     uint32_t k = (uint32_t)(fix_is_live() ? speed_units() + 1 : 0);  // 0..~250
     k = k * 257u + nav_view_limit();
     k = k * 2u + (nav_view_mph() ? 1u : 0u);
-    // Distance left in 100 m steps, or the heading in whole degrees.
-    k = k * 1024u + (uint32_t)(rem < 0 ? 600 + (s_cog_cdeg + 50) / 100 % 360 : (rem / 100) % 600);
+    // The average to a tenth, or the heading in whole degrees.
+    uint32_t tail = s_trip_moving_ms >= 30000
+                        ? (uint32_t)(s_trip_m * 1000.0 / (s_trip_moving_ms / 1000.0)) % 4096u
+                        : 4096u + (s_cog_cdeg + 50) / 100 % 360;
+    k = k * 8192u + tail;
     return (int32_t)(k & 0x7FFFFFFFu);
 }
 
@@ -1376,14 +1391,199 @@ static void render_start_cb(lv_event_t *e)
     }
 }
 
+// ---- the other faces ----
+
+static bool face_ok(int f)
+{
+    return (f != FACE_ROUTE && f != FACE_ETA) || nav_view_active();
+}
+
+// The next face in direction dir (+1 / -1) that can show now, or -1.
+static int face_step(int dir)
+{
+    for (int f = s_face + dir; f >= 0 && f < FACE_N; f += dir) {
+        if (face_ok(f)) return f;
+    }
+    return -1;
+}
+
+// Local time now, seconds since the epoch, or 0 while the phone has not said.
+static uint32_t clock_now(void)
+{
+    return s_clock_ok ? s_clock_epoch + (now_ms() - s_clock_at) / 1000 : 0;
+}
+
+static void fmt_clock(char *out, size_t cap, uint32_t local_s)
+{
+    uint32_t m = local_s / 60 % 1440;
+    lv_snprintf(out, cap, "%02u:%02u", (unsigned)(m / 60), (unsigned)(m % 60));
+}
+
+// One dot per face that can show, the current one bright.
+static void draw_dots(lv_layer_t *layer)
+{
+    int n = 0, at = 0;
+    for (int f = 0; f < FACE_N; f++) {
+        if (!face_ok(f)) continue;
+        if (f == s_face) at = n;
+        n++;
+    }
+    if (n < 2) return;
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.radius = LV_RADIUS_CIRCLE;
+    d.bg_opa = LV_OPA_COVER;
+    for (int i = 0; i < n; i++) {
+        int x = HALF + (2 * i - (n - 1)) * 8, r = i == at ? 4 : 3;
+        d.bg_color = lv_color_hex(i == at ? 0xFFFFFF : 0x5F6368);
+        lv_area_t a = {x - r, 438 - r, x + r, 438 + r};
+        lv_draw_rect(layer, &d, &a);
+    }
+}
+
+// Arrival: when, how long, how far, over the trip progress arc.
+static void draw_eta(lv_layer_t *layer)
+{
+    char buf[32];
+    int rem_s = nav_view_remaining_s();
+    uint32_t now = clock_now();
+    if (now) {
+        char hm[8];
+        fmt_clock(hm, sizeof(hm), now + (uint32_t)rem_s);
+        lv_snprintf(buf, sizeof(buf), "ETA %s", hm);
+        draw_text(layer, buf, &lv_font_montserrat_28, lv_color_hex(0xB0B8C0), HALF, 150, 300);
+    }
+    int mins = (rem_s + 30) / 60;
+    if (mins >= 60) lv_snprintf(buf, sizeof(buf), "%dh %02dm", mins / 60, mins % 60);
+    else lv_snprintf(buf, sizeof(buf), "%d min", mins);
+    draw_text(layer, buf, &lv_font_montserrat_48, lv_color_white(), HALF, 214, 340);
+
+    int rem = nav_view_remaining_m();
+    if (rem < 0) rem = 0;
+    if (nav_view_mph()) lv_snprintf(buf, sizeof(buf), "%d.%d mi", rem / 1609, (rem % 1609) * 10 / 1609);
+    else lv_snprintf(buf, sizeof(buf), "%d.%d km", rem / 1000, (rem % 1000) / 100);
+    lv_draw_rect_dsc_t box;
+    lv_draw_rect_dsc_init(&box);
+    box.radius = 14;
+    box.bg_opa = LV_OPA_TRANSP;
+    box.border_color = lv_color_hex(0x9AA0A6);
+    box.border_width = 2;
+    box.border_opa = LV_OPA_COVER;
+    lv_area_t a = {HALF - 90, 278, HALF + 90, 334};
+    lv_draw_rect(layer, &box, &a);
+    draw_text(layer, buf, &lv_font_montserrat_28, lv_color_white(), HALF, 306, 170);
+    draw_progress(layer);
+}
+
+// A small sun: disc and eight rays. Marks the brightness buttons.
+static void draw_sun(lv_layer_t *layer, int32_t cx, int32_t cy, int32_t r)
+{
+    lv_draw_rect_dsc_t disc;
+    lv_draw_rect_dsc_init(&disc);
+    disc.radius = LV_RADIUS_CIRCLE;
+    disc.bg_color = lv_color_white();
+    disc.bg_opa = LV_OPA_COVER;
+    lv_area_t a = {cx - r, cy - r, cx + r, cy + r};
+    lv_draw_rect(layer, &disc, &a);
+    lv_draw_line_dsc_t ray;
+    lv_draw_line_dsc_init(&ray);
+    ray.color = lv_color_white();
+    ray.width = r >= 8 ? 3 : 2;
+    ray.round_start = ray.round_end = 1;
+    for (int i = 0; i < 8; i++) {
+        float ang = i * (float)M_PI / 4.0f;
+        ray.p1.x = cx + cosf(ang) * (r + 4);
+        ray.p1.y = cy + sinf(ang) * (r + 4);
+        ray.p2.x = cx + cosf(ang) * (r * 2 + 3);
+        ray.p2.y = cy + sinf(ang) * (r * 2 + 3);
+        lv_draw_line(layer, &ray);
+    }
+}
+
+#define SUN_Y 222
+#define SUN_DIM_X 66
+#define SUN_BRIGHT_X 414
+
+// The phone's battery as a ring, the time, and the brightness buttons: the
+// small sun on the left dims, the large one on the right brightens.
+static void draw_phone(lv_layer_t *layer)
+{
+    char buf[24];
+    uint32_t now = clock_now();
+    if (now) {
+        fmt_clock(buf, sizeof(buf), now);
+        draw_text(layer, buf, &lv_font_montserrat_28, lv_color_hex(0xB0B8C0), HALF, 96, 200);
+    }
+
+    const int32_t cy = 222, r = 82;
+    lv_draw_arc_dsc_t arc;
+    lv_draw_arc_dsc_init(&arc);
+    arc.center.x = HALF;
+    arc.center.y = cy;
+    arc.radius = r;
+    arc.width = 9;
+    arc.opa = LV_OPA_COVER;
+    arc.color = lv_color_hex(0x33383E);
+    arc.start_angle = 0;
+    arc.end_angle = 360;
+    lv_draw_arc(layer, &arc);
+    if (s_phone_batt > 0) {
+        arc.rounded = 1;
+        arc.color = lv_color_hex(s_phone_charging ? 0x34A853 : s_phone_batt <= 20 ? 0xD93025 : 0xFFFFFF);
+        arc.start_angle = 270;
+        arc.end_angle = 270 + 360 * s_phone_batt / 100;
+        lv_draw_arc(layer, &arc);
+    }
+    // A phone outline in the ring, with the figure under it.
+    lv_draw_rect_dsc_t ph;
+    lv_draw_rect_dsc_init(&ph);
+    ph.radius = 7;
+    ph.bg_opa = LV_OPA_TRANSP;
+    ph.border_color = lv_color_white();
+    ph.border_width = 3;
+    ph.border_opa = LV_OPA_COVER;
+    lv_area_t body = {HALF - 16, cy - 46, HALF + 16, cy + 8};
+    lv_draw_rect(layer, &ph, &body);
+    if (s_phone_batt >= 0) lv_snprintf(buf, sizeof(buf), "%d%%", s_phone_batt);
+    else lv_snprintf(buf, sizeof(buf), "--");
+    draw_text(layer, buf, &lv_font_montserrat_28, lv_color_white(), HALF, cy + 36, 140);
+
+    draw_sun(layer, SUN_DIM_X, SUN_Y, 5);
+    draw_sun(layer, SUN_BRIGHT_X, SUN_Y, 9);
+    if (s_bright_cb) {
+        lv_snprintf(buf, sizeof(buf), "Brightness %d%%", s_bright_cb(0));
+        draw_text(layer, buf, &lv_font_montserrat_20, lv_color_hex(0x9AA0A6), HALF, 356, 260);
+    }
+}
+
+// What the current face shows, folded into one number: a change means redraw.
+static int32_t face_key(void)
+{
+    uint32_t minute = clock_now() / 60 % 1440;
+    switch (s_face) {
+    case FACE_SPEED:
+        return speedo_key();
+    case FACE_ETA: {
+        int rem = nav_view_remaining_m();
+        return (int32_t)(((uint32_t)(nav_view_remaining_s() / 30) * 4096u + (uint32_t)((rem < 0 ? 0 : rem) / 100) % 4096u) * 1440u + minute) & 0x7FFFFFFF;
+    }
+    default:
+        return (int32_t)((((uint32_t)(s_phone_batt + 1) * 2u + (s_phone_charging ? 1u : 0u)) * 128u +
+                          (uint32_t)(s_bright_cb ? s_bright_cb(0) : 0)) * 1440u + minute);
+    }
+}
+
 static void draw_cb(lv_event_t *e)
 {
     lv_layer_t *layer = lv_event_get_layer(e);
     int32_t sx = 0, sy = 0;
     bool have_sx = false;
     if (s_minimal && s_speedo) {
-        s_speedo_key = speedo_key();
-        draw_speedo(layer);
+        s_speedo_key = face_key();
+        if (s_face == FACE_ETA) draw_eta(layer);
+        else if (s_face == FACE_PHONE) draw_phone(layer);
+        else draw_speedo(layer);
+        draw_dots(layer);
         s_r_valid = true;
         return;
     }
@@ -1591,12 +1791,13 @@ void map_view_recenter(void)
 
 // ---------------------------------------------------------------- input
 
-static void set_speedo(bool on)
+static void set_face(int f)
 {
-    if (on == s_speedo) return;
-    s_speedo = on;
+    if (f == s_face) return;
+    s_face = f;
+    s_speedo = f != FACE_ROUTE;
     s_speedo_key = -1;
-    nav_view_set_suppressed(on);
+    nav_view_set_suppressed(s_speedo);
     update_buttons();
     invalidate();
 }
@@ -1628,19 +1829,22 @@ static void map_event_cb(lv_event_t *e)
             }
         } else if (code == LV_EVENT_RELEASED && !s_press_fired) {
             if (abs(dx) >= SWIPE_MIN_PX && abs(dx) > 2 * abs(dy)) {
-                // The faces sit in a row: music, route, speedometer. Swiping
-                // right moves towards the speedometer and left towards the
-                // music controls. With no drive running the route face has
-                // nothing on it, so it is skipped.
-                if (dx > 0) {
-                    s_speedo_pref = 1;
-                    set_speedo(true);
-                } else if (s_speedo && nav_view_active()) {
-                    s_speedo_pref = 0;
-                    set_speedo(false);
-                } else if (s_media_cb) {
+                // The faces sit in a row: music, route, speedometer, arrival,
+                // phone. Swiping right moves along it and left moves back; left
+                // from the first face that can show opens the music controls,
+                // so music is always one swipe from the route.
+                int f = face_step(dx > 0 ? 1 : -1);
+                if (f >= 0) {
+                    s_speedo_pref = f;
+                    set_face(f);
+                } else if (dx < 0 && s_media_cb) {
                     s_media_cb();  // only asks for the screen; main.c switches later
                 }
+            } else if (s_face == FACE_PHONE && s_speedo && s_bright_cb &&
+                       abs(dx) + abs(dy) < DRAG_SLOP_PX * 2 && abs(p.y - SUN_Y) < 70) {
+                // A tap on a sun: ten percent down on the left, up on the right.
+                if (p.x < SUN_DIM_X + 60) s_bright_cb(-10);
+                else if (p.x > SUN_BRIGHT_X - 60) s_bright_cb(10);
             }
         }
         return;
@@ -1952,6 +2156,15 @@ void map_view_set_fix(int32_t lat_e7, int32_t lon_e7, uint16_t speed_cms, uint16
         s_anim_t0 = t;
         s_anim = true;
     }
+    // Trip counter: distance as speed times the time since the last fix, only
+    // while moving and only across a normal gap (not a link dropout).
+    if (s_fix_live && speed_cms >= MOVING_OFF_CMS) {
+        uint32_t gap = t - s_last_fix_ms;
+        if (gap > 0 && gap < 3000) {
+            s_trip_m += speed_cms / 100.0 * gap / 1000.0;
+            s_trip_moving_ms += gap;
+        }
+    }
     s_has_fix = true;
     s_fix_live = true;
     s_last_fix_ms = t;
@@ -2045,10 +2258,25 @@ float map_view_rotation(void)
     return s_rot;
 }
 
+void map_view_set_phone(int battery_pct, bool charging, uint32_t local_epoch_s)
+{
+    s_phone_batt = battery_pct;
+    s_phone_charging = charging;
+    s_clock_epoch = local_epoch_s;
+    s_clock_at = now_ms();
+    s_clock_ok = true;
+}
+
+void map_view_set_brightness_cb(int (*cb)(int delta))
+{
+    s_bright_cb = cb;
+}
+
 void map_view_set_link(bool connected, bool paired)
 {
     s_connected = connected;
     s_paired = paired;
+    if (!connected) s_phone_batt = -1;  // unknown again; the clock keeps running
     update_status();
 }
 
@@ -2115,7 +2343,10 @@ void map_view_tick(void)
         s_speedo_pref = -1;  // a drive started or ended: back to the automatic face
         update_buttons();
     }
-    if (s_minimal) set_speedo(s_speedo_pref >= 0 ? s_speedo_pref == 1 : !nav_on);
+    if (s_minimal) {
+        set_face(s_speedo_pref >= 0 && face_ok(s_speedo_pref) ? s_speedo_pref
+                 : nav_on ? FACE_ROUTE : FACE_SPEED);
+    }
     nav_view_tick();  // staleness must hide the banner even without a stop message
     // Cheap: update_status() early-returns unless the state or ETA minute
     // changed. Needed here so the ETA counts down while everything else is
@@ -2149,7 +2380,7 @@ void map_view_tick(void)
         if (s_mode_cb) s_mode_cb();
     }
     if (s_minimal && s_speedo) {
-        if (speedo_key() != s_speedo_key) lv_obj_invalidate(s_map);
+        if (face_key() != s_speedo_key) lv_obj_invalidate(s_map);
     } else if (s_minimal && nav_view_progress_permille() != s_prog_shown) {
         lv_obj_invalidate(s_map);
     }
@@ -2211,6 +2442,7 @@ void map_view_set_minimal(bool on)
     s_scale = on ? CRUISE_SCALE : 1.0;
     s_turn_near = false;
     s_follow = true;  // nothing can drag the minimal display off the marker
+    s_face = FACE_ROUTE;
     s_speedo = false;
     s_speedo_pref = -1;
     nav_view_set_suppressed(false);

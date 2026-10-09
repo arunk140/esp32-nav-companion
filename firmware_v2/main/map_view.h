@@ -65,6 +65,14 @@ void map_view_roads_chunk(const uint8_t *data, size_t len);
 // of the road ahead shows.
 void map_view_set_minimal(bool on);
 
+// The phone's battery (percent, -1 unknown) and its local time, for the
+// minimal display's faces. The clock keeps running from the last value.
+void map_view_set_phone(int battery_pct, bool charging, uint32_t local_epoch_s);
+
+// The battery face has brightness buttons. cb(delta) changes the brightness by
+// that many percent and returns the level in use; cb(0) only asks.
+void map_view_set_brightness_cb(int (*cb)(int delta));
+
 // A long press on the map asks to switch between the map and the minimal
 // display. Runs from map_view_tick, not from the event.
 void map_view_set_mode_cb(void (*cb)(void));

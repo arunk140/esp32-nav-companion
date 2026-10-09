@@ -42,7 +42,7 @@ static bool s_minimal;
 static bool s_suppressed;
 static uint16_t s_limit;
 static bool s_mph;
-static uint16_t s_total_m;  // longest remaining distance seen this trip
+static uint32_t s_total_m;  // longest remaining distance seen this trip
 
 // ---- UI ----
 static lv_obj_t *s_banner, *s_lbl_street, *s_lbl_dist, *s_lbl_left;
@@ -245,10 +245,10 @@ static void refresh(void)
     }
     lv_label_set_text(s_lbl_dist, buf);
 
-    uint16_t rm = s_st.remaining_m;
+    uint32_t rm = s_st.remaining_m;
     char left[24];
     if (rm >= 10000) snprintf(left, sizeof(left), "%.1f km left", rm / 1000.0f);
-    else snprintf(left, sizeof(left), "%u m left", rm);
+    else snprintf(left, sizeof(left), "%u m left", (unsigned)rm);
     lv_label_set_text(s_lbl_left, left);
     lv_obj_set_hidden(s_lbl_left, s_minimal);
 }
@@ -303,7 +303,7 @@ int nav_view_dist_m(void)
 
 int nav_view_remaining_m(void)
 {
-    return nav_view_active() ? s_st.remaining_m : -1;
+    return nav_view_active() ? (int)s_st.remaining_m : -1;
 }
 
 void nav_view_set_minimal(bool on)
@@ -317,7 +317,7 @@ int nav_view_progress_permille(void)
 {
     if (!nav_view_active() || !s_total_m) return -1;
     if (s_st.maneuver == NAV_ARRIVE) return 1000;
-    return 1000 - (int)((uint32_t)s_st.remaining_m * 1000u / s_total_m);
+    return 1000 - (int)((uint64_t)s_st.remaining_m * 1000u / s_total_m);
 }
 
 static void banner_draw_cb(lv_event_t *e)
@@ -406,7 +406,7 @@ void nav_view_update(const nav_state_t *st, const char *street)
             logged = true;
             ESP_LOGW("nav", "first state: active=%d maneuver=%u dist=%u after=%u+%u rem=%um/%us",
                      st->flags & NAV_F_ACTIVE, st->maneuver, st->dist_m, st->after_maneuver,
-                     st->after_dist_m, st->remaining_m, st->remaining_s);
+                     st->after_dist_m, (unsigned)st->remaining_m, st->remaining_s);
         }
 #endif
         s_st = *st;

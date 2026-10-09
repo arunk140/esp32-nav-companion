@@ -196,7 +196,7 @@ static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
             .dist_m = le16(b + 3),
             .after_maneuver = b[5],
             .after_dist_m = le16(b + 6),
-            .remaining_m = le16(b + 8),
+            .remaining_m = (uint32_t)le16(b + 8) * ((b[1] & NAV_F_REM_10M) ? 10u : 1u),
             .remaining_s = le16(b + 10),
         };
         // STATE carries no street name: pass NULL so the GUI keeps the last
@@ -216,6 +216,13 @@ static int chr_nav_state(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
         if (len < NAV_DEST_LEN) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         if (s_cbs.on_nav_dest) {
             s_cbs.on_nav_dest(b[1] != 0, (int32_t)le32(b + 2), (int32_t)le32(b + 6));
+        }
+    } else if (b[0] == NAV_PHONE) {
+        if (len < NAV_PHONE_LEN) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        int16_t tz_min = (int16_t)le16(b + 8);
+        if (s_cbs.on_phone_info) {
+            s_cbs.on_phone_info(b[1] == 0xFF ? -1 : b[1], (b[2] & 1) != 0,
+                                le32(b + 4) + (uint32_t)((int32_t)tz_min * 60));
         }
     } else if (b[0] == NAV_ROADS) {
         if (len < NAV_ROADS_HDR || len > NAV_ROADS_CHUNK_MAX) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;

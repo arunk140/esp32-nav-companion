@@ -187,6 +187,18 @@ static void ble_on_nav_dest(bool present, int32_t lat_e7, int32_t lon_e7)
 static volatile bool s_limit_dirty, s_limit_mph;
 static volatile uint16_t s_limit_val;
 
+static volatile bool s_phone_dirty, s_phone_charging;
+static volatile int s_phone_batt;
+static volatile uint32_t s_phone_epoch;
+
+static void ble_on_phone_info(int battery_pct, bool charging, uint32_t local_epoch_s)
+{
+    s_phone_batt = battery_pct;
+    s_phone_charging = charging;
+    s_phone_epoch = local_epoch_s;
+    s_phone_dirty = true;
+}
+
 static void ble_on_nav_limit(bool mph, uint16_t limit)
 {
     s_limit_mph = mph;
@@ -384,6 +396,22 @@ static void toggle_minimal(void)
     map_view_toast(on ? "Minimal display" : "Map");
 }
 
+// Brightness from the device's own screen (the battery face). Returns the
+// level now in use; a delta of 0 only asks.
+static int local_brightness(int delta)
+{
+    int v = s_brightness_dirty ? s_brightness_pending : settings_brightness();
+    if (!delta) return v;
+    v += delta;
+    if (v < NAV_BRIGHTNESS_MIN) v = NAV_BRIGHTNESS_MIN;
+    if (v > 100) v = 100;
+    apply_brightness((uint8_t)v);
+    s_brightness_pending = (uint8_t)v;
+    s_brightness_dirty = true;
+    s_brightness_changed_ms = now_ms();
+    return v;
+}
+
 static void set_theme(bool dark)
 {
     tiles_set_dark(dark);
@@ -517,6 +545,10 @@ static void process_events(void)
             }
         }
         if (nm.have_dest) map_view_set_dest(nm.dest_present, nm.dest_lat_e7, nm.dest_lon_e7);
+    }
+    if (s_phone_dirty) {
+        s_phone_dirty = false;
+        map_view_set_phone(s_phone_batt, s_phone_charging, s_phone_epoch);
     }
     if (s_limit_dirty) {
         s_limit_dirty = false;
@@ -797,6 +829,7 @@ void app_main(void)
     map_view_init_state();
     set_minimal(settings_minimal());
     map_view_set_mode_cb(toggle_minimal);
+    map_view_set_brightness_cb(local_brightness);
     map_view_set_reset_cb(local_reset);
     map_view_set_media_cb(open_media);
     map_view_set_sleep_cb(enter_deep_sleep);
@@ -827,6 +860,7 @@ void app_main(void)
         .on_nav_state = ble_on_nav_state,
         .on_nav_dest = ble_on_nav_dest,
         .on_nav_limit = ble_on_nav_limit,
+        .on_phone_info = ble_on_phone_info,
         .on_roads_chunk = ble_on_roads_chunk,
         .on_route_chunk = ble_on_route_chunk,
         .on_call_ring = ble_on_call_ring,

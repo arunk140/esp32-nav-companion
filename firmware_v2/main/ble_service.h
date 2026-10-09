@@ -51,6 +51,9 @@
 #define NAV_TEXT_MAX 48
 #define NAV_F_ACTIVE 0x01   // navigation is running
 #define NAV_F_NO_ACCESS 0x02 // app could not read OsmAnd
+// remaining_m on the wire is in units of 10 m, which reaches 655 km. Without
+// it the unit is metres and the field stops at 65.5 km (older phone apps).
+#define NAV_F_REM_10M 0x04
 
 // Route geometry for the map (added 2026-10-05). Valhalla returns the route
 // shape (OsmAnd never did), so the device can draw the actual line. A route can
@@ -88,6 +91,13 @@
 #define NAV_ROADS_F_END 0x02
 #define NAV_ROADS_LINE_MAX 60
 #define NAV_ROADS_CHUNK_MAX 252
+
+// The phone's battery and clock (added 2026-10-09). 12 bytes:
+//   [0] 0x07, [1] battery percent (0xFF = unknown), [2] flags (bit0 charging),
+//   [3] 0, [4..7] u32 Unix time in seconds, [8..9] i16 minutes east of UTC,
+//   [10..11] 0. Sent after connecting and about once a minute.
+#define NAV_PHONE 0x07
+#define NAV_PHONE_LEN 12
 
 #define NAV_NONE 0
 #define NAV_CONTINUE 1
@@ -202,7 +212,7 @@ typedef struct {
     uint16_t dist_m;           // to the maneuver
     uint8_t after_maneuver;
     uint16_t after_dist_m;
-    uint16_t remaining_m;
+    uint32_t remaining_m;      // metres, whatever unit it arrived in
     uint16_t remaining_s;
 } nav_state_t;
 
@@ -234,6 +244,9 @@ typedef struct {
     // One NAV_ROADS write, header included (data[0] == NAV_ROADS). Runs in the
     // NimBLE host task: copy and return.
     void (*on_roads_chunk)(const uint8_t *data, size_t len);
+
+    // Phone battery (-1 unknown) and local time as seconds since the epoch.
+    void (*on_phone_info)(int battery_pct, bool charging, uint32_t local_epoch_s);
 
     // Speed limit in the phone's units; limit 0 = unknown. mph is false for km/h.
     void (*on_nav_limit)(bool mph, uint16_t limit);
