@@ -19,6 +19,7 @@
 #include "ble_service.h"
 #include "board.h"
 #include "call_view.h"
+#include "boot_view.h"
 #include "display.h"
 #include "lcd.h"
 #include "lvgl.h"
@@ -90,7 +91,7 @@ typedef struct {
 } call_msg_t;
 static QueueHandle_t s_call_q;
 
-typedef enum { SCREEN_NONE, SCREEN_PAIR, SCREEN_MAP, SCREEN_MEDIA, SCREEN_CALL } screen_t;
+typedef enum { SCREEN_NONE, SCREEN_PAIR, SCREEN_MAP, SCREEN_MEDIA, SCREEN_CALL, SCREEN_BOOT } screen_t;
 static screen_t s_screen = SCREEN_NONE;
 // Screen changes requested from inside LVGL events are applied by the GUI
 // loop: rebuilding the screen deletes the object whose event is running.
@@ -285,6 +286,15 @@ static void call_dismiss_cb(void)
     return_from_call();
 }
 
+// The start-up animation has played: on to the screen the device starts on.
+// Runs from an LVGL timer, so it only asks.
+static void boot_done(void)
+{
+    if (s_screen == SCREEN_BOOT && s_screen_req == SCREEN_NONE) {
+        s_screen_req = settings_paired() ? SCREEN_MAP : SCREEN_PAIR;
+    }
+}
+
 static void show_screen(screen_t which)
 {
     if (which == s_screen) return;
@@ -293,9 +303,14 @@ static void show_screen(screen_t which)
     media_view_destroy();
     nav_view_destroy();
     call_view_destroy();
+    boot_view_destroy();
     lv_obj_clean(scr);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    if (which == SCREEN_PAIR) {
+    if (which == SCREEN_BOOT) {
+        // Waking from deep sleep restarts the chip like a power-on does, and
+        // plays the same animation at the same speed.
+        boot_view_create(scr, false, settings_device_name(), boot_done);
+    } else if (which == SCREEN_PAIR) {
         ui_pair_create(scr, browse_cb);
     } else if (which == SCREEN_MEDIA) {
         s_media_touch_ms = now_ms();  // opening it counts as touching it
@@ -862,7 +877,7 @@ void app_main(void)
     s_roads_q = xQueueCreate(16, sizeof(roads_chunk_t));
     s_traffic_q = xQueueCreate(1, sizeof(roads_chunk_t));
 
-    show_screen(settings_paired() ? SCREEN_MAP : SCREEN_PAIR);
+    show_screen(SCREEN_BOOT);
 
     static const nav_ble_cbs_t cbs = {
         .on_position = ble_on_position,
