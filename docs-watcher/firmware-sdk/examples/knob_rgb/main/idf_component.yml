@@ -1,0 +1,8 @@
+## IDF Component Manager Manifest File
+dependencies:
+  ## Required IDF version
+  idf:
+    version: ">=5.0"
+
+  sensecap-watcher:
+    override_path: "../../../components/sensecap-watcher"

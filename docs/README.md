@@ -42,6 +42,13 @@ Reference material for building a navigation device on the
 | `waveshare-2.8c/reference/` | Mechanical structure files (STEP) |
 | `waveshare-2.8c/media/` | Product photos, dimension drawing, demo UI |
 
+## Related
+
+A second target board is under evaluation: the **Seeed Studio SenseCAP Watcher
+W1-A**. Its docs live outside this folder, in [`../docs-watcher/`](../docs-watcher/README.md)
+— the port delta table is in
+[`../docs-watcher/porting-notes.md`](../docs-watcher/porting-notes.md).
+
 ## Source
 
 All content derived from the official Waveshare wiki:
