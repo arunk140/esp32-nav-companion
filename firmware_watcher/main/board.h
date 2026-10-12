@@ -56,7 +56,7 @@
 #define EXIO_BAT_STDBY_DET 1   // (in) charge complete
 #define EXIO_VBUS_IN_DET 2     // (in) external 5 V present
 #define EXIO_KNOB_BTN 3        // (in) wheel press, active low
-#define EXIO_SD_DET 4          // (in) microSD present
+#define EXIO_SD_DET 4          // (in) microSD present, active low
 #define EXIO_TOUCH_INT 5       // (in) SPD2010 touch interrupt, active low
 #define EXIO_HIMAX_SYNC 6      // (in) Himax ready; unused by the nav firmware
 #define EXIO_HIMAX_RST 7       // (in) — see docs-watcher/pinout.md, this bit is
@@ -68,7 +68,7 @@
 #define EXIO_PWR_CODEC_PA 12   // audio codec/PA rail; unused by the nav firmware
 #define EXIO_BAT_DET 13        // (in) battery fitted
 #define EXIO_PWR_GROVE 14      // Grove connector rail; unused by the nav firmware
-#define EXIO_PWR_BAT_ADC 15    // battery divider enable; unused by the nav firmware
+#define EXIO_PWR_BAT_ADC 15    // battery divider enable
 
 esp_err_t board_i2c_init(void);
 i2c_master_bus_handle_t board_i2c_bus(void);
@@ -91,6 +91,25 @@ void board_backlight_set(uint8_t pct);
 // press switch, which sits behind the expander. Polled by the GUI task.
 void board_boot_button_init(void);
 bool board_boot_button_pressed(void);
+
+// The wheel's rotation: a quadrature encoder on GPIO41/42. board_knob_steps()
+// returns the detents turned since the last call, positive clockwise.
+void board_knob_init(void);
+int board_knob_steps(void);
+
+// The device's own battery, read through the divider on GPIO3. *charging is
+// true while external power is present. Returns false if the ADC is
+// unavailable. GUI task only: it reads the expander over I2C.
+bool board_battery_read(int *pct, bool *charging);
+
+// Deep sleep leaves every pin floating unless told otherwise. A floating
+// backlight enable turns the backlight on, and floating bus lines feed stray
+// current into the unpowered panel, which shows as flickering lines. So before
+// sleeping, board_sleep_pins_hold() drives the backlight and panel bus pins low
+// and latches them there; board_sleep_pins_release() undoes the latch after the
+// wake (it survives the reset) and must run before the backlight or LCD init.
+void board_sleep_pins_hold(void);
+void board_sleep_pins_release(void);
 
 // Drops the peripheral rails ahead of deep sleep. Leaves EXIO_PWR_SYSTEM up so
 // the device stays alive on its backup battery.

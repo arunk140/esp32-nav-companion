@@ -2,6 +2,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "ble_service.h"
+#include "board.h"
 #include "lvgl.h"
 
 // Album art pipeline: BLE ART chunks -> reassembly -> JPEG decode -> round
@@ -10,6 +12,8 @@
 // Background of the media page, and the colour the album art's corners are
 // masked toward. Independent of the map theme.
 #define MEDIA_ART_BG 0x000000
+// Side of the art as drawn: the phone's NAV_ART_PX, scaled like the layout.
+#define MEDIA_ART_PX UI_SC(NAV_ART_PX)
 
 void media_art_init(void);
 

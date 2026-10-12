@@ -1,6 +1,10 @@
 #include "board.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/pulse_cnt.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -109,10 +113,10 @@ esp_err_t board_exio_init(void)
     vTaskDelay(pdMS_TO_TICKS(100));
 
     // Only the rails this firmware uses are raised. The vendor's start-up mask
-    // also enables the Himax (AI), codec/PA, Grove and battery-divider rails;
-    // the nav firmware uses none of them, so leaving them off saves power and
-    // keeps the Himax off the SPI2 bus it shares with the microSD.
-    s_exio_out |= (1u << EXIO_PWR_LCD) | (1u << EXIO_PWR_SD);
+    // also enables the Himax (AI), codec/PA and Grove rails; the nav firmware
+    // uses none of them, so leaving them off saves power and keeps the Himax
+    // off the SPI2 bus it shares with the microSD.
+    s_exio_out |= (1u << EXIO_PWR_LCD) | (1u << EXIO_PWR_SD) | (1u << EXIO_PWR_BAT_ADC);
     err = exio_write_pair(PCA9535_REG_OUTPUT0, s_exio_out & 0xFF, s_exio_out >> 8);
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -135,13 +139,155 @@ esp_err_t board_exio_set(int bit, bool level)
     return exio_write_pair(PCA9535_REG_OUTPUT0, s_exio_out & 0xFF, s_exio_out >> 8);
 }
 
+// Both input ports in one read (which also clears the expander's interrupt).
+static bool exio_read(uint16_t *in)
+{
+    if (!s_exio_ready) return false;
+    uint8_t reg = PCA9535_REG_INPUT0;
+    uint8_t b[2] = {0};
+    if (i2c_master_transmit_receive(s_exio, &reg, 1, b, 2, 100) != ESP_OK) return false;
+    *in = (uint16_t)b[0] | ((uint16_t)b[1] << 8);
+    return true;
+}
+
 bool board_exio_get(int bit)
 {
-    if (!s_exio_ready || bit < 0 || bit > 15) return false;
-    uint8_t reg = PCA9535_REG_INPUT0;
-    uint8_t in[2] = {0};
-    if (i2c_master_transmit_receive(s_exio, &reg, 1, in, 2, 100) != ESP_OK) return false;
-    return ((uint16_t)in[0] | ((uint16_t)in[1] << 8)) & (1u << bit);
+    uint16_t in;
+    if (bit < 0 || bit > 15 || !exio_read(&in)) return false;
+    return in & (1u << bit);
+}
+
+// The wheel, decoded in hardware by a pulse counter so no step is lost while
+// the GUI task is busy pushing a frame. Both edges of both phases count, which
+// is four counts per quadrature cycle; half a cycle is one step (a full cycle
+// per step felt sluggish on the device).
+#define KNOB_A 41
+#define KNOB_B 42
+#define KNOB_COUNTS_PER_STEP 2
+#define KNOB_LIMIT 1000
+
+static pcnt_unit_handle_t s_knob;
+static int s_knob_seen;
+
+void board_knob_init(void)
+{
+    const pcnt_unit_config_t unit = {
+        .high_limit = KNOB_LIMIT,
+        .low_limit = -KNOB_LIMIT,
+        .flags.accum_count = 1,
+    };
+    const pcnt_glitch_filter_config_t filter = {.max_glitch_ns = 1000};
+    const pcnt_chan_config_t cfg_a = {.edge_gpio_num = KNOB_A, .level_gpio_num = KNOB_B};
+    const pcnt_chan_config_t cfg_b = {.edge_gpio_num = KNOB_B, .level_gpio_num = KNOB_A};
+    pcnt_channel_handle_t a = NULL, b = NULL;
+    pcnt_unit_handle_t u = NULL;
+    if (pcnt_new_unit(&unit, &u) != ESP_OK || pcnt_unit_set_glitch_filter(u, &filter) != ESP_OK ||
+        pcnt_new_channel(u, &cfg_a, &a) != ESP_OK || pcnt_new_channel(u, &cfg_b, &b) != ESP_OK) {
+        ESP_LOGE(TAG, "knob: pulse counter unavailable");
+        return;
+    }
+    pcnt_channel_set_edge_action(a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
+    pcnt_channel_set_level_action(a, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
+    pcnt_channel_set_edge_action(b, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE);
+    pcnt_channel_set_level_action(b, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
+    // The limits are watch points so the driver carries the count across them.
+    pcnt_unit_add_watch_point(u, KNOB_LIMIT);
+    pcnt_unit_add_watch_point(u, -KNOB_LIMIT);
+    gpio_set_pull_mode(KNOB_A, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(KNOB_B, GPIO_PULLUP_ONLY);
+    pcnt_unit_enable(u);
+    pcnt_unit_clear_count(u);
+    pcnt_unit_start(u);
+    s_knob = u;
+}
+
+int board_knob_steps(void)
+{
+    if (!s_knob) return 0;
+    int count = 0;
+    if (pcnt_unit_get_count(s_knob, &count) != ESP_OK) return 0;
+    // Hand out whole steps only; a part-turned detent stays for next time.
+    int steps = (count - s_knob_seen) / KNOB_COUNTS_PER_STEP;
+    s_knob_seen += steps * KNOB_COUNTS_PER_STEP;
+    return steps;
+}
+
+// Battery sense, copied from the vendor BSP (sensecap-watcher.c:377-432):
+// GPIO3 = ADC1 channel 2 behind a 62k/20k divider, 2.5 dB attenuation, and the
+// vendor's own voltage-to-percent curve.
+#define BAT_ADC_CHAN ADC_CHANNEL_2
+#define BAT_ADC_ATTEN ADC_ATTEN_DB_2_5
+#define BAT_SAMPLES 10
+
+bool board_battery_read(int *pct, bool *charging)
+{
+    static adc_oneshot_unit_handle_t adc;
+    static adc_cali_handle_t cali;
+    static bool tried;
+    if (!tried) {
+        tried = true;
+        const adc_oneshot_unit_init_cfg_t unit = {.unit_id = ADC_UNIT_1};
+        const adc_oneshot_chan_cfg_t chan = {.bitwidth = ADC_BITWIDTH_DEFAULT, .atten = BAT_ADC_ATTEN};
+        const adc_cali_curve_fitting_config_t cal = {
+            .unit_id = ADC_UNIT_1,
+            .chan = BAT_ADC_CHAN,
+            .atten = BAT_ADC_ATTEN,
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        if (adc_oneshot_new_unit(&unit, &adc) != ESP_OK ||
+            adc_oneshot_config_channel(adc, BAT_ADC_CHAN, &chan) != ESP_OK ||
+            adc_cali_create_scheme_curve_fitting(&cal, &cali) != ESP_OK) {
+            ESP_LOGE(TAG, "battery ADC unavailable");
+            cali = NULL;
+        }
+    }
+    // Not gated on EXIO_BAT_DET: on the bench unit it reads "absent" by the
+    // vendor's polarity while the divider shows a healthy 4.19 V, and the
+    // vendor's own firmware never consults it either.
+    if (!cali || !s_exio_ready) return false;
+
+    int sum = 0;
+    for (int i = 0; i < BAT_SAMPLES; i++) {
+        int raw = 0, mv = 0;
+        adc_oneshot_read(adc, BAT_ADC_CHAN, &raw);
+        adc_cali_raw_to_voltage(cali, raw, &mv);
+        sum += mv;
+    }
+    int v = sum / BAT_SAMPLES * 82 / 20;  // battery mV
+    int p = (-v * v + 9016 * v - 19189000) / 10000;
+    *pct = p > 100 ? 100 : p < 0 ? 0 : p;
+    // "On external power", not strictly "charging": VBUS-detect reads low with
+    // USB plugged in. The charger's own CHRG/STDBY flags only tell charging
+    // from full, which the percentage already shows.
+    *charging = !board_exio_get(EXIO_VBUS_IN_DET);
+    return true;
+}
+
+// Backlight, then the panel's QSPI bus: CS, clock, D0-D3 (see lcd.c).
+static const gpio_num_t s_sleep_low_pins[] = {BL_GPIO, 45, 7, 9, 1, 14, 13};
+#define SLEEP_LOW_PINS (sizeof(s_sleep_low_pins) / sizeof(s_sleep_low_pins[0]))
+
+void board_sleep_pins_hold(void)
+{
+    // Take the backlight off its PWM channel first, idling low.
+    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+    for (size_t i = 0; i < SLEEP_LOW_PINS; i++) {
+        gpio_num_t pin = s_sleep_low_pins[i];
+        gpio_reset_pin(pin);  // back to a plain GPIO, off the SPI/LEDC signal
+        gpio_set_pull_mode(pin, GPIO_FLOATING);
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(pin, 0);
+        gpio_hold_en(pin);
+    }
+    // Pins outside the RTC domain (the panel's CS) only keep their latch
+    // through deep sleep with this set as well.
+    gpio_deep_sleep_hold_en();
+}
+
+void board_sleep_pins_release(void)
+{
+    gpio_deep_sleep_hold_dis();
+    for (size_t i = 0; i < SLEEP_LOW_PINS; i++) gpio_hold_dis(s_sleep_low_pins[i]);
 }
 
 void board_power_rails_off(void)
@@ -192,6 +338,8 @@ void board_boot_button_init(void)
 bool board_boot_button_pressed(void)
 {
     // Active low, and only on the *button* bit — the same register also carries
-    // the touch interrupt and the charger flags.
-    return !board_exio_get(EXIO_KNOB_BTN);
+    // the touch interrupt and the charger flags. A failed read is "not
+    // pressed": a long press unpairs, and an I2C fault must not do that.
+    uint16_t in;
+    return exio_read(&in) && !(in & (1u << EXIO_KNOB_BTN));
 }

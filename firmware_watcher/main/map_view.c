@@ -63,6 +63,10 @@
 #define COL_GRAY 0x9AA0A6
 
 #define HALF (BOARD_LCD_W / 2)
+// The pixel-centre of the round screen and its radius, for everything that
+// rotates about it.
+#define VIEW_C ((BOARD_LCD_W - 1) / 2.0f)
+#define VIEW_R (BOARD_LCD_W / 2.0f)
 
 // Layout values below are design-space: see UI_SC() in board.h.
 
@@ -103,6 +107,11 @@ static bool s_connected, s_paired;
 static lv_obj_t *s_map, *s_pill, *s_pill_dot, *s_pill_lbl;
 static lv_obj_t *s_btn_in, *s_btn_out, *s_btn_center, *s_btn_media, *s_toast;
 static uint32_t s_toast_until;
+// The "no tiles" / "no SD card" notice: shown once per boot, for a few seconds.
+#define NOTICE_MS 5000
+static lv_obj_t *s_notice;
+static uint32_t s_notice_until;
+static bool s_notice_shown;
 static int s_status_key = -1;
 static int s_status_eta_min = -1;   // last ETA minutes drawn (nav pill)
 static void (*s_reset_cb)(void);
@@ -148,13 +157,15 @@ static float route_frac_now(void)
 // behind us. The gap between NEAR and FAR stops it hunting when the distance
 // hovers. NEAR sits just past what CRUISE can show, so the pull-back starts as
 // the turn is about to come into view.
-#define CRUISE_SCALE 1.6
-#define TURN_SCALE 0.8
+// Both follow the panel's size, so a smaller screen shows the same stretch of
+// road rather than less of it.
+#define CRUISE_SCALE (1.6 * BOARD_LCD_W / UI_DESIGN)
+#define TURN_SCALE (0.8 * BOARD_LCD_W / UI_DESIGN)
 #define TURN_NEAR_M 250
 #define TURN_FAR_M 320
 #define SCALE_RATE 2.5f       // 1/s, exponential ease
 #define SWIPE_MIN_PX 70       // sideways travel that counts as a swipe
-#define MINI_AHEAD_PX 60      // the arrow sits this far below the centre
+#define MINI_AHEAD_PX UI_SC(60)      // the arrow sits this far below the centre
 #define MODE_HOLD_MS 900      // long press on the map switches mode
 static bool s_minimal;
 static int s_zoom_other = MINI_ZOOM_DEFAULT;  // the zoom of the mode not shown
@@ -178,6 +189,9 @@ static double s_trip_m;
 static uint32_t s_trip_moving_ms;
 // From the phone: battery, and local time as an epoch taken at s_clock_at.
 static int s_phone_batt = -1;
+// The device's own battery: -1 = unknown.
+static int s_dev_batt = -1;
+static bool s_dev_charging;
 static bool s_phone_charging;
 static uint32_t s_clock_epoch, s_clock_at;
 static bool s_clock_ok;
@@ -295,8 +309,8 @@ static void world_screen(double nx, double ny, int32_t ox, int32_t oy, float rot
     }
     float wx = (float)((nx - s_cx) * w), wy = (float)((ny - s_cy) * w);
     float r = rot * (float)M_PI / 180.0f, c = cosf(r), sn = sinf(r);
-    *sx = (int32_t)lroundf(239.5f + wx * c + wy * sn);
-    *sy = (int32_t)lroundf(239.5f - wx * sn + wy * c);
+    *sx = (int32_t)lroundf(VIEW_C + wx * c + wy * sn);
+    *sy = (int32_t)lroundf(VIEW_C - wx * sn + wy * c);
 }
 
 static float wrap180(float a)
@@ -373,8 +387,8 @@ static void chevron(lv_layer_t *layer, int32_t x, int32_t y, float a, float k, l
 
 static void draw_chevron(lv_layer_t *layer, int32_t x, int32_t y, float a, bool live)
 {
-    chevron(layer, x, y, a, 1.45f, lv_color_black());
-    chevron(layer, x, y, a, 1.0f, lv_color_hex(live ? 0xFFFFFF : COL_STALE));
+    chevron(layer, x, y, a, UI_SCF(1.45f), lv_color_black());
+    chevron(layer, x, y, a, UI_SCF(1.0f), lv_color_hex(live ? 0xFFFFFF : COL_STALE));
 }
 
 static void draw_marker(lv_layer_t *layer, int32_t x, int32_t y, float rot)
@@ -517,7 +531,7 @@ static float s_f_rot;
 
 #define ROUTE_CASING 9
 #define ROUTE_W 5
-#define ROUTE_W_MINI 11
+#define ROUTE_W_MINI UI_SC(11)
 
 // Trip progress along the bottom edge of the round screen (minimal display).
 // Angles are LVGL's: clockwise from 3 o'clock, so 90 is the bottom. The arc
@@ -905,7 +919,7 @@ static void fill_rect(uint8_t *fb, uint32_t stride, int x0, int y0, int w, int h
 }
 
 // ---- heading-up rendering ----
-// Only the visible disc (r = 240) is drawn: the panel is round, the corners
+// Only the visible disc (r = VIEW_R) is drawn: the panel is round, the corners
 // don't exist. Each screen row is a straight line through the tile grid, so
 // it is walked with constant 16.16 fixed-point steps (no trig per pixel),
 // bilinear-filtered so rotated roads and labels stay smooth.
@@ -999,7 +1013,9 @@ static void rot_block(int bx, int by, uint16_t *stage)
 {
     const rjob_t *j = &s_job;
     // Rows of this block that intersect the disc.
+    // The last band is short when the panel is not a whole number of blocks.
     int y0 = by, y1 = by + BLK - 1;
+    if (y1 > BOARD_LCD_H - 1) y1 = BOARD_LCD_H - 1;
     while (y0 <= y1 && (s_xe_tab[y0] < bx || s_xs_tab[y0] > bx + BLK - 1)) y0++;
     while (y1 >= y0 && (s_xe_tab[y1] < bx || s_xs_tab[y1] > bx + BLK - 1)) y1--;
     if (y0 > y1) return;
@@ -1007,8 +1023,8 @@ static void rot_block(int bx, int by, uint16_t *stage)
     // Source rectangle covered by the block (corners), plus bilinear margin.
     float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;
     for (int k = 0; k < 4; k++) {
-        float px = (k & 1 ? bx + BLK - 1 : bx) - 239.5f;
-        float py = (k & 2 ? y1 : y0) - 239.5f;
+        float px = (k & 1 ? bx + BLK - 1 : bx) - VIEW_C;
+        float py = (k & 2 ? y1 : y0) - VIEW_C;
         float u = j->ocx + px * j->c - py * j->sn - 0.5f;
         float v = j->ocy + px * j->sn + py * j->c - 0.5f;
         umin = fminf(umin, u), umax = fmaxf(umax, u);
@@ -1024,7 +1040,7 @@ static void rot_block(int bx, int by, uint16_t *stage)
         int xs = s_xs_tab[y] > bx ? s_xs_tab[y] : bx;
         int xe = s_xe_tab[y] < bx + BLK - 1 ? s_xe_tab[y] : bx + BLK - 1;
         if (xe < xs) continue;
-        float px = xs - 239.5f, py = y - 239.5f;
+        float px = xs - VIEW_C, py = y - VIEW_C;
         // -0.5: bilinear weights are relative to texel centres.
         float u = j->ocx + px * j->c - py * j->sn - 0.5f - iu0;
         float v = j->ocy + px * j->sn + py * j->c - 0.5f - iv0;
@@ -1063,9 +1079,9 @@ static void rot_helper_task(void *arg)
 static void rot_init(void)
 {
     for (int y = 0; y < BOARD_LCD_H; y++) {
-        float py = y - 239.5f, h2 = 240.0f * 240.0f - py * py;
+        float py = y - VIEW_C, h2 = VIEW_R * VIEW_R - py * py;
         float hw = h2 > 0.0f ? sqrtf(h2) : 0.0f;
-        int xs = (int)ceilf(239.5f - hw), xe = (int)floorf(239.5f + hw);
+        int xs = (int)ceilf(VIEW_C - hw), xe = (int)floorf(VIEW_C + hw);
         s_xs_tab[y] = xs < 0 ? 0 : xs;
         s_xe_tab[y] = xe > BOARD_LCD_W - 1 ? BOARD_LCD_W - 1 : xe;
     }
@@ -1252,9 +1268,9 @@ void map_view_roads_chunk(const uint8_t *data, size_t len)
 // next to the route and fade to nothing further out, so the route stays the
 // only bright line and its surroundings read as context.
 #define ROAD_CELL 8
-#define ROAD_GRID (BOARD_LCD_W / ROAD_CELL)
-#define ROAD_FADE_NEAR_PX 28    // full strength up to here
-#define ROAD_FADE_FAR_PX 200    // invisible from here on
+#define ROAD_GRID ((BOARD_LCD_W + ROAD_CELL - 1) / ROAD_CELL)  // rounds up: a part cell at the edge
+#define ROAD_FADE_NEAR_PX UI_SC(28)    // full strength up to here
+#define ROAD_FADE_FAR_PX UI_SC(200)    // invisible from here on
 #define ROAD_SHADES 16
 static uint8_t s_road_dist[ROAD_GRID * ROAD_GRID];
 static uint8_t s_road_shade[256];  // distance value -> shade, 0 = not drawn
@@ -1270,8 +1286,8 @@ static inline void road_seed(int x, int y)
 static inline void frame_screen(double nx, double ny, double w, float c, float sn, int *x, int *y)
 {
     float wx = (float)((nx - s_cx) * w), wy = (float)((ny - s_cy) * w);
-    *x = (int)lroundf(239.5f + wx * c + wy * sn);
-    *y = (int)lroundf(239.5f - wx * sn + wy * c);
+    *x = (int)lroundf(VIEW_C + wx * c + wy * sn);
+    *y = (int)lroundf(VIEW_C - wx * sn + wy * c);
 }
 
 static void road_fade_build(double w, float c, float sn)
@@ -1408,7 +1424,7 @@ static void draw_roads(uint8_t *fb, uint32_t stride)
         int px = 0, py = 0;
         for (int i = 0; i < ln->n; i++) {
             float wx = bx + rs->dx[ln->first + i] * wf, wy = by + rs->dy[ln->first + i] * wf;
-            int x = (int)lroundf(239.5f + wx * c + wy * sn), y = (int)lroundf(239.5f - wx * sn + wy * c);
+            int x = (int)lroundf(VIEW_C + wx * c + wy * sn), y = (int)lroundf(VIEW_C - wx * sn + wy * c);
             if (i) fb_line(fb, stride, px, py, x, y, ln->cls ? major : minor, ln->cls ? 5 : 3);
             px = x, py = y;
         }
@@ -1654,9 +1670,16 @@ static void draw_phone(lv_layer_t *layer)
 
     draw_sun(layer, SUN_DIM_X, SUN_Y, UI_SC(5));
     draw_sun(layer, SUN_BRIGHT_X, SUN_Y, UI_SC(9));
+    if (s_dev_batt >= 0) {
+        lv_snprintf(buf, sizeof(buf), "Device %d%%", s_dev_batt);
+        draw_text(layer, buf, &lv_font_montserrat_20,
+                  lv_color_hex(s_dev_charging ? 0x34A853 : s_dev_batt <= 20 ? 0xD93025 : 0xFFFFFF), HALF,
+                  UI_SC(340), UI_SC(260));
+    }
     if (s_bright_cb) {
         lv_snprintf(buf, sizeof(buf), "Brightness %d%%", s_bright_cb(0));
-        draw_text(layer, buf, &lv_font_montserrat_20, lv_color_hex(0x9AA0A6), HALF, UI_SC(356), UI_SC(260));
+        draw_text(layer, buf, &lv_font_montserrat_20, lv_color_hex(0x9AA0A6), HALF,
+                  s_dev_batt >= 0 ? UI_SC(372) : UI_SC(356), UI_SC(260));
     }
 }
 
@@ -1671,9 +1694,11 @@ static int32_t face_key(void)
         int rem = nav_view_remaining_m();
         return (int32_t)(((uint32_t)(nav_view_remaining_s() / 30) * 4096u + (uint32_t)((rem < 0 ? 0 : rem) / 100) % 4096u) * 1440u + minute) & 0x7FFFFFFF;
     }
-    default:
-        return (int32_t)((((uint32_t)(s_phone_batt + 1) * 2u + (s_phone_charging ? 1u : 0u)) * 128u +
-                          (uint32_t)(s_bright_cb ? s_bright_cb(0) : 0)) * 1440u + minute);
+    default: {
+        uint32_t k = (((uint32_t)(s_phone_batt + 1) * 2u + (s_phone_charging ? 1u : 0u)) * 128u +
+                      (uint32_t)(s_bright_cb ? s_bright_cb(0) : 0)) * 1440u + minute;
+        return (int32_t)((k * 263u + (uint32_t)(s_dev_batt + 1) * 2u + (s_dev_charging ? 1u : 0u)) & 0x7FFFFFFF);
+    }
     }
 }
 
@@ -1711,7 +1736,7 @@ static void draw_cb(lv_event_t *e)
             lv_draw_rect_dsc_init(&band);
             band.bg_color = lv_color_black();
             band.bg_opa = LV_OPA_70;
-            lv_area_t a = {0, nav_view_banner_top() - 6, BOARD_LCD_W - 1, BOARD_LCD_H - 1};
+            lv_area_t a = {0, nav_view_banner_top() - UI_SC(6), BOARD_LCD_W - 1, BOARD_LCD_H - 1};
             lv_draw_rect(layer, &band, &a);
         }
         draw_progress(layer);
@@ -2201,8 +2226,10 @@ void map_view_create(lv_obj_t *parent)
     lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, 66);
     lv_obj_set_hidden(s_toast, true);
 
-    if (!tiles_zoom_min() && !s_minimal) {
-        lv_obj_t *msg = lv_label_create(parent);
+    if (!tiles_zoom_min() && !s_minimal && !s_notice_shown) {
+        s_notice_shown = true;
+        s_notice_until = now_ms() + NOTICE_MS;
+        lv_obj_t *msg = s_notice = lv_label_create(parent);
         lv_label_set_text(msg, sdcard_ok() ? "No map tiles found in\n/sdcard/street_map"
                                            : "No SD card\nInsert the map card and restart");
         lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
@@ -2226,7 +2253,7 @@ void map_view_destroy(void)
     if (s_map) lv_display_remove_event_cb_with_user_data(display_get(), render_start_cb, NULL);
     // Objects are deleted by the caller cleaning the screen.
     s_map = s_pill = s_pill_dot = s_pill_lbl = NULL;
-    s_btn_in = s_btn_out = s_btn_center = s_btn_media = s_toast = NULL;
+    s_btn_in = s_btn_out = s_btn_center = s_btn_media = s_toast = s_notice = NULL;
     s_r_valid = false;
 }
 
@@ -2405,6 +2432,17 @@ void map_view_set_phone(int battery_pct, bool charging, bool clock_24h, uint32_t
     s_clock_ok = true;
 }
 
+bool map_view_brightness_face(void)
+{
+    return s_face == FACE_PHONE && s_speedo;
+}
+
+void map_view_set_device_batt(int battery_pct, bool charging)
+{
+    s_dev_batt = battery_pct;
+    s_dev_charging = charging;
+}
+
 void map_view_set_brightness_cb(int (*cb)(int delta))
 {
     s_bright_cb = cb;
@@ -2560,6 +2598,10 @@ void map_view_tick(void)
     if (!s_minimal && t - s_prefetch_ms > PREFETCH_MS) {
         s_prefetch_ms = t;
         prefetch_ring();
+    }
+    if (s_notice && (int32_t)(t - s_notice_until) > 0) {
+        lv_obj_delete(s_notice);
+        s_notice = NULL;
     }
     if (s_toast_until && (int32_t)(t - s_toast_until) > 0) {
         s_toast_until = 0;

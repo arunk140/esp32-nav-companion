@@ -44,7 +44,8 @@ static esp_err_t try_mount(int khz)
 
 esp_err_t sdcard_init(void)
 {
-    if (!board_exio_get(EXIO_SD_DET)) {
+    // Card-detect is active low, as in the vendor's bsp_sdcard_is_inserted().
+    if (board_exio_get(EXIO_SD_DET)) {
         // Not fatal on its own (the switch can be flaky), but worth saying: the
         // mount below is what actually decides.
         ESP_LOGW(TAG, "no card detected (expander bit %d)", EXIO_SD_DET);

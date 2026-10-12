@@ -14,7 +14,7 @@
 // Values are design-space pixels for a 480x480 round panel: see UI_SC().
 #define ART_CX (BOARD_LCD_W / 2)
 #define ART_CY UI_SC(162)
-#define ART_D NAV_ART_PX
+#define ART_D MEDIA_ART_PX
 #define PROG_D UI_SC(222)  // progress ring, just outside the art
 #define PROG_W UI_SC(5)
 #define VOL_D UI_SC(448)  // volume arc, on the rim; its centre is the screen's
@@ -456,7 +456,7 @@ void media_view_create(lv_obj_t *parent, void (*on_back)(void))
     s_btn_play = icon_button(parent, LV_SYMBOL_PLAY, BOARD_LCD_W / 2, ROW_Y, UI_SC(76), &lv_font_montserrat_28, 0, true, play_cb);
     s_lbl_play = lv_obj_get_child(s_btn_play, 0);
     // Back, where the music button is on the map. A swipe right does the same.
-    icon_button(parent, LV_SYMBOL_LEFT, 52, 240, 56, &lv_font_montserrat_20, COL_TEXT, false, back_cb);
+    icon_button(parent, LV_SYMBOL_LEFT, UI_SC(52), UI_SC(240), UI_SC(56), &lv_font_montserrat_20, COL_TEXT, false, back_cb);
 
     s_prog_shown = -1;
     s_msg_key = -1;

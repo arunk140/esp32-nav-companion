@@ -74,6 +74,13 @@ void map_view_set_minimal(bool on);
 // keeps running from the last value.
 void map_view_set_phone(int battery_pct, bool charging, bool clock_24h, uint32_t local_epoch_s);
 
+// The device's own battery (percent, -1 = unknown), shown on the battery
+// face under the phone's.
+void map_view_set_device_batt(int battery_pct, bool charging);
+
+// True while the battery/brightness face is the one on screen.
+bool map_view_brightness_face(void);
+
 // The battery face has brightness buttons. cb(delta) changes the brightness by
 // that many percent and returns the level in use; cb(0) only asks.
 void map_view_set_brightness_cb(int (*cb)(int delta));

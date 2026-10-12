@@ -40,6 +40,10 @@ static const char *TAG = "nav";
 #define UNPAIR_HOLD_MS 5000
 #define BRIGHTNESS_SAVE_MS 1500
 #define TOUCH_POLL_MS 10
+#define BATTERY_POLL_MS 10000
+#define KNOB_BRIGHTNESS_STEP 5    // percent per wheel step
+#define KNOB_VOLUME_MAX_STEPS 8   // per pass; the BLE command queue is short
+#define KNOB_VOLUME_TOAST_MS 1500 // how long after a turn a volume report is "ours"
 
 static void note_activity(void);
 static void enter_deep_sleep(void);
@@ -425,6 +429,8 @@ static void toggle_minimal(void)
     map_view_toast(on ? "Minimal display" : "Map");
 }
 
+static uint32_t s_knob_vol_ms;  // last wheel turn sent as volume; 0 = never
+
 // Brightness from the device's own screen (the battery face). Returns the
 // level now in use; a delta of 0 only asks.
 static int local_brightness(int delta)
@@ -439,6 +445,24 @@ static int local_brightness(int delta)
     s_brightness_dirty = true;
     s_brightness_changed_ms = now_ms();
     return v;
+}
+
+// The wheel: brightness while the battery/brightness face is up, the phone's
+// media volume everywhere else.
+static void poll_knob(void)
+{
+    int steps = board_knob_steps();
+    if (!steps) return;
+    note_activity();
+    if (s_screen == SCREEN_MAP && map_view_brightness_face()) {
+        local_brightness(steps * KNOB_BRIGHTNESS_STEP);
+        return;
+    }
+    if (!nav_ble_media_ready()) return;
+    int n = steps < 0 ? -steps : steps;
+    if (n > KNOB_VOLUME_MAX_STEPS) n = KNOB_VOLUME_MAX_STEPS;
+    while (n--) nav_ble_media_cmd(steps > 0 ? NAV_MCMD_VOL_UP : NAV_MCMD_VOL_DOWN, 0);
+    s_knob_vol_ms = now_ms() ? now_ms() : 1;
 }
 
 static void set_theme(bool dark)
@@ -594,6 +618,13 @@ static void process_events(void)
     if (xQueueReceive(s_media_q, &ms, 0) == pdTRUE) {
         note_activity();
         media_view_set_state(&ms);
+        // The music screen has its own volume arc; everywhere else the phone's
+        // answer to a turn of the wheel is the only feedback there is.
+        if (s_knob_vol_ms && now_ms() - s_knob_vol_ms < KNOB_VOLUME_TOAST_MS && s_screen == SCREEN_MAP) {
+            char buf[20];
+            snprintf(buf, sizeof(buf), "Volume %d%%", ms.volume);
+            map_view_toast(buf);
+        }
     }
     nav_position_t p;
     if (xQueueReceive(s_pos_q, &p, 0) == pdTRUE && valid_fix(&p)) {
@@ -730,11 +761,25 @@ static void sleep_now(void)
     map_view_flush_state();
     if (s_brightness_dirty) settings_set_brightness(s_brightness_pending);
     board_backlight_set(0);
+    touch_poll();                          // drain the controller: INT idle high
+    vTaskDelay(pdMS_TO_TICKS(50));         // and let the last frame leave the bus
+    // Backlight and panel bus low and latched, then the rail: nothing may be
+    // left driving, or floating into, a panel that has lost its supply.
+    board_sleep_pins_hold();
     // Drop the peripheral rails (LCD, SD, codec, Grove). The panel and card are
     // re-powered by board_exio_init() on the reset that follows the wake.
     board_power_rails_off();
-    touch_poll();                          // drain the controller: INT idle high
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // The wake line is the expander's interrupt, which asserts on ANY input
+    // change and stays asserted until the inputs are read. Dropping the rails
+    // changes several inputs at once (the touch interrupt falls with the LCD
+    // rail), and so does letting go of the wheel after the long press that
+    // asked for this - either one left pending wakes the chip the instant it
+    // sleeps. So: let the rails settle, wait for the wheel to be released,
+    // then read the inputs, which clears the interrupt.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    for (int i = 0; i < 100 && board_boot_button_pressed(); i++) vTaskDelay(pdMS_TO_TICKS(30));
+    vTaskDelay(pdMS_TO_TICKS(30));
+    board_exio_get(0);
     ESP_LOGW(TAG, "deep sleep (wheel to wake)");
     // Wake source: the IO expander's shared interrupt on GPIO2, active low.
     // GPIO2 is RTC-capable, and the expander's INT is open-drain, so the RTC
@@ -780,7 +825,7 @@ static void gui_task(void *arg)
 {
     (void)arg;
     bool backlight_on = false;
-    uint32_t last_touch = 0, last_fps_pub = 0;
+    uint32_t last_touch = 0, last_fps_pub = 0, last_batt = 0;
     for (;;) {
         uint32_t t = now_ms();
         if (t - last_touch >= TOUCH_POLL_MS) {
@@ -798,6 +843,7 @@ static void gui_task(void *arg)
 #endif
         process_events();
         poll_boot_button();
+        poll_knob();
         power_tick();
         sleep_tick();
         map_view_tick();
@@ -822,6 +868,15 @@ static void gui_task(void *arg)
             apply_brightness(settings_brightness());
             note_activity();
         }
+        if (!last_batt || t - last_batt >= BATTERY_POLL_MS) {
+            bool first = !last_batt;
+            last_batt = t ? t : 1;
+            int pct = -1;
+            bool charging = false;
+            if (!board_battery_read(&pct, &charging)) pct = -1;
+            if (first) ESP_LOGW(TAG, "battery: %d%%%s", pct, pct < 0 ? " (unavailable)" : charging ? " on USB" : "");
+            map_view_set_device_batt(pct, charging);
+        }
         if (t - last_fps_pub > 1000) {
             last_fps_pub = t;
             nav_ble_set_fps((uint8_t)(display_fps() > 255 ? 255 : display_fps()));
@@ -844,6 +899,7 @@ void app_main(void)
     // before either. After that the panel (SPI3) and the card (SPI2) are
     // independent — unlike the Waveshare board, where the card and the panel's
     // init SPI shared GPIO1/2 and had to be sequenced.
+    board_sleep_pins_release();  // latched low across the sleep we woke from
     ESP_ERROR_CHECK(board_i2c_init());
     ESP_ERROR_CHECK(board_exio_init());  // raises the LCD + SD rails
     board_backlight_init();              // off until the first frame
@@ -851,6 +907,7 @@ void app_main(void)
     if (touch_init() != ESP_OK) ESP_LOGE(TAG, "touch unavailable");
     sdcard_init();  // failure is shown on screen
     board_boot_button_init();
+    board_knob_init();
 
     tiles_init();
     // Stored preference wins over the build-time default.

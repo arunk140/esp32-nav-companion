@@ -67,21 +67,43 @@ static bool on_color_trans_done(esp_lcd_panel_io_handle_t io,
     return woken == pdTRUE;
 }
 
+// The panel takes RGB565 high byte first; LVGL and map_view.c (which paints
+// straight into the frame buffer) both write the CPU's little-endian order.
+// Sent as-is, every colour comes out wrong and antialiased edges turn into
+// bright fringes. The vendor BSP sets LV_COLOR_16_SWAP for the same reason.
+//
+// Swapped here, in place, rather than by rendering in RGB565_SWAPPED: LVGL
+// blends widgets over the map by reading the buffer back, so it has to stay
+// native until the frame is finished. In-place is safe because FULL mode
+// repaints the whole buffer before it is flushed again.
+static void swap_bytes(uint8_t *px, uint32_t bytes)
+{
+    uint32_t *p = (uint32_t *)px;
+    for (uint32_t n = bytes / 4; n; n--, p++) {
+        uint32_t v = *p;
+        *p = ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
+    }
+}
+
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px)
 {
     (void)disp;
     (void)area;
     s_draw_ms = (uint32_t)((esp_timer_get_time() - s_render_t0) / 1000);
+    swap_bytes(px, BOARD_LCD_W * BOARD_LCD_H * 2);
     s_flush_t0 = esp_timer_get_time();
-    // Full-frame transfer: the draw buffer is the whole screen, so the area is
-    // always 0,0..W,H. The DMA runs in the background; completion arrives in
-    // on_color_trans_done.
-    esp_lcd_panel_draw_bitmap(lcd_panel(), 0, 0, BOARD_LCD_W, BOARD_LCD_H, px);
 
     // Arm a one-shot notification for this frame, matching the pattern
-    // firmware_v2 used for the RGB panel's scan-out.
+    // firmware_v2 used for the RGB panel's scan-out. Armed before the transfer
+    // is queued: with a transaction queue depth of 1, draw_bitmap blocks until
+    // only the last chunk is left, so its completion can arrive before we get
+    // back here.
     xSemaphoreTake(s_frame_sem, 0);
     s_frame_armed = true;
+
+    // Full-frame transfer: the draw buffer is the whole screen, so the area is
+    // always 0,0..W,H. Completion arrives in on_color_trans_done.
+    esp_lcd_panel_draw_bitmap(lcd_panel(), 0, 0, BOARD_LCD_W, BOARD_LCD_H, px);
 
     s_frames++;
     uint32_t now = tick_cb();

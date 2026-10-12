@@ -15,7 +15,12 @@
 
 static const char *TAG = "art";
 
-#define PX NAV_ART_PX
+// The phone always sends NAV_ART_PX square. The screen wants it at the size
+// the rest of the layout is scaled to, so it is resampled once, here, and
+// drawing it later stays a plain copy.
+#define SRC_PX NAV_ART_PX
+#define SRC_BYTES (SRC_PX * SRC_PX * 2)
+#define PX MEDIA_ART_PX
 #define IMG_BYTES (PX * PX * 2)
 #define MB_BYTES (12 * 1024)
 
@@ -23,6 +28,7 @@ static MessageBufferHandle_t s_mb;  // host task -> art task, one ART write each
 static QueueHandle_t s_done_q;      // art task -> GUI, buffer index
 static SemaphoreHandle_t s_ack;     // GUI -> art task: front buffer switched
 static uint8_t *s_jpeg;             // reassembly buffer
+static uint16_t *s_raw;             // decoded at SRC_PX, before resampling
 static uint16_t *s_img[2];
 static lv_image_dsc_t s_dsc[2];
 static uint16_t s_img_id[2];
@@ -70,25 +76,48 @@ static void apply_round_mask(uint16_t *img)
     }
 }
 
+// Bilinear resample of the decoded SRC_PX square into a PX square.
+static void resample(const uint16_t *src, uint16_t *dst)
+{
+    if (PX == SRC_PX) {
+        memcpy(dst, src, IMG_BYTES);
+        return;
+    }
+    const uint32_t step = ((uint32_t)(SRC_PX - 1) << 16) / (PX - 1);
+    for (int y = 0; y < PX; y++) {
+        uint32_t v = (uint32_t)y * step;
+        int y0 = v >> 16, y1 = y0 + 1 < SRC_PX ? y0 + 1 : y0;
+        uint32_t ky = 256 - ((v >> 8) & 0xFF);
+        const uint16_t *r0 = src + y0 * SRC_PX, *r1 = src + y1 * SRC_PX;
+        for (int x = 0; x < PX; x++) {
+            uint32_t u = (uint32_t)x * step;
+            int x0 = u >> 16, x1 = x0 + 1 < SRC_PX ? x0 + 1 : x0;
+            uint32_t kx = 256 - ((u >> 8) & 0xFF);
+            dst[y * PX + x] = blend565(blend565(r0[x0], r0[x1], kx), blend565(r1[x0], r1[x1], kx), ky);
+        }
+    }
+}
+
 static bool decode(size_t len, int target)
 {
     esp_jpeg_image_cfg_t cfg = {
         .indata = s_jpeg,
         .indata_size = len,
-        .outbuf = (uint8_t *)s_img[target],
-        .outbuf_size = IMG_BYTES,
+        .outbuf = (uint8_t *)s_raw,
+        .outbuf_size = SRC_BYTES,
         .out_format = JPEG_IMAGE_FORMAT_RGB565,
         .out_scale = JPEG_IMAGE_SCALE_0,
     };
     esp_jpeg_image_output_t out;
-    if (esp_jpeg_get_image_info(&cfg, &out) != ESP_OK || out.width != PX || out.height != PX) {
-        ESP_LOGW(TAG, "art rejected: not a %dx%d baseline JPEG", PX, PX);
+    if (esp_jpeg_get_image_info(&cfg, &out) != ESP_OK || out.width != SRC_PX || out.height != SRC_PX) {
+        ESP_LOGW(TAG, "art rejected: not a %dx%d baseline JPEG", SRC_PX, SRC_PX);
         return false;
     }
     if (esp_jpeg_decode(&cfg, &out) != ESP_OK) {
         ESP_LOGW(TAG, "art decode failed");
         return false;
     }
+    resample(s_raw, s_img[target]);
     apply_round_mask(s_img[target]);
     return true;
 }
@@ -145,6 +174,7 @@ void media_art_init(void)
     s_done_q = xQueueCreate(1, sizeof(int));
     s_ack = xSemaphoreCreateBinary();
     s_jpeg = heap_caps_malloc(NAV_ART_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    s_raw = heap_caps_aligned_alloc(64, SRC_BYTES, MALLOC_CAP_SPIRAM);
     for (int i = 0; i < 2; i++) {
         s_img[i] = heap_caps_aligned_alloc(64, IMG_BYTES, MALLOC_CAP_SPIRAM);
         s_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -155,7 +185,7 @@ void media_art_init(void)
         s_dsc[i].data_size = IMG_BYTES;
         s_dsc[i].data = (const uint8_t *)s_img[i];
     }
-    if (!s_mb || !s_jpeg || !s_img[0] || !s_img[1]) {
+    if (!s_mb || !s_jpeg || !s_raw || !s_img[0] || !s_img[1]) {
         ESP_LOGE(TAG, "album art OOM");
         return;
     }

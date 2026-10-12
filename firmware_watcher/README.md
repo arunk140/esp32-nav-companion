@@ -9,9 +9,9 @@ contract, same map: a different board underneath.
 > its power rails come up, LVGL allocates both PSRAM buffers, touch initialises,
 > and it stays up with no crash, no WDT and no transfer errors.
 >
-> **Not visually verified.** The device is on a bench with no display output
-> available to the tooling, so *what the panel shows* — colour order, mirroring,
-> layout at 412 px — has not been confirmed by eye. See
+> **Checked by serial log, not by eye.** The tooling cannot see the panel, so
+> what is on the glass is only known from what the owner reports. A first round
+> of fixes from that (colour byte order, touch, sleep, 412 px layout) is in; see
 > [Verified on hardware](#verified-on-hardware) for what was and was not checked.
 >
 > The first flash also turned up a real bug in the panel bus configuration; it is
@@ -30,7 +30,7 @@ idf.py build
 # licence keys. Nothing here writes it, but a wrong offset would destroy it.
 esptool.py --chip esp32s3 --baud 2000000 read_flash 0x9000 204800 nvsfactory.bin
 
-# app-flash, not flash: writes only the app slot (ota_0 @ 0x110000) and
+# app-flash, not flash: writes only the app slot (ota_0 @ 0x200000) and
 # leaves the partition table, bootloader and nvsfactory alone.
 idf.py -p /dev/ttyACM0 app-flash
 idf.py -p /dev/ttyACM0 monitor
@@ -108,11 +108,11 @@ there is no on-board receiver, the Watcher's pin shortage does not matter.
 
 | File | Role |
 | --- | --- |
-| `board.c` | I2C0/I2C1, **PCA9535 expander + power rails (raw I2C, no component)**, backlight on GPIO8, wheel button |
+| `board.c` | I2C0/I2C1, **PCA9535 expander + power rails (raw I2C, no component)**, backlight on GPIO8, wheel button and rotation (pulse counter on GPIO41/42), battery sense on GPIO3, pin latching for sleep |
 | `lcd.c` | SPD2010 QSPI panel on SPI3 |
 | `touch.c` | SPD2010 touch on I2C1 |
 | `sdcard.c` | SD over SPI2, 20 MHz → 10 MHz fallback, never formats |
-| `display.c` | LVGL 9 FULL mode, two PSRAM draw buffers, async QSPI flush |
+| `display.c` | LVGL 9 FULL mode, two PSRAM draw buffers, byte swap to the panel's big-endian RGB565, QSPI flush |
 | `main.c` | Init order, BLE→GUI plumbing, GUI loop, deep sleep via expander INT |
 | *(the rest)* | Unchanged from `firmware_v2/` — see `firmware_v2/README.md`, which documents the BLE contract, map, media and call behaviour in full |
 
@@ -194,21 +194,29 @@ boot):
 
 Still unverified, and the honest list of what to look at first:
 
-1. **What is actually on the glass.** Colour order and mirroring are copied from
-   the vendor BSP but have not been seen. If colours are swapped, change
-   `LCD_RGB_ELEMENT_ORDER_RGB`; if the image is rotated or flipped,
-   `esp_lcd_panel_mirror()` and the touch `swap_xy`/`mirror_*` flags.
+1. **What is actually on the glass.** The first build sent LVGL's little-endian
+   RGB565 to a panel that wants it high byte first (the vendor sets
+   `LV_COLOR_16_SWAP`); `display.c` now swaps in `flush_cb`. If red and blue are
+   still exchanged, change `LCD_RGB_ELEMENT_ORDER_RGB`; if the image is rotated
+   or flipped, `esp_lcd_panel_mirror()` and the touch `swap_xy`/`mirror_*` flags.
 2. **The scaled layouts.** Screens are proportionally scaled from a 480×480
    design via `UI_SC()`; text sizes are not scaled, so expect a few labels to
    want hand-tuning at 412.
-3. **Touch accuracy** and the 98 % bezel mask.
-4. **SD card.** No card was fitted, so `sdcard_init()` only reported
-   "no card detected" and the mount path is untested — as is `tiles.c` reading
-   `/sdcard/street_map`, and the map itself.
+3. **Touch.** The SPD2010 only returns points when it has a new report, and
+   reports a lift as a zero-weight point; `touch_poll()` now holds the last
+   sample between reports and drops zero-weight points. Written from the driver
+   source, not from captured touch data. Accuracy and the 98 % bezel mask are
+   also unchecked.
+4. **SD card.** A card mounts over SPI at 20 MHz (card-detect is active low; the
+   first build read it inverted and logged "no card" with one fitted). The card
+   on the bench has no `/sdcard/street_map`, so `tiles.c` and the tile map are
+   still untested.
 5. **Performance.** No fps/draw/xfer numbers yet; the ~17 ms/frame QSPI ceiling
    is still theory. `CONFIG_NAV_DEBUG_STATS` (plus `NAV_DEBUG_DEMO_WALK` for
    movement without a phone) is the way to measure it.
-6. **Sleep and wake**, including whether the wheel button reliably asserts INT.
+6. **Sleep and wake.** The device now stays asleep (it used to wake at once:
+   see [Power and sleep](#power-and-sleep)). Waking with the wheel button has
+   not been tried; only a reset over USB has.
 7. **Himax rail off while the SD shares SPI2** — still untested, needs a card.
 8. **`FLASH_MODE_AUTO_DETECT`.** The vendor forces QIO and this port leaves
    auto-detect on; the boot log shows the ROM stage starting in `DIO`.
@@ -273,6 +281,18 @@ after `NAV_DEEP_SLEEP_MS`, and never while BLE is connected. What differs:
   state change) is what wakes the device. That is a real change from the
   Waveshare build's tap-to-wake. To experiment, keep `EXIO_PWR_LCD` up in
   `board_power_rails_off()` and measure the sleep current.
+
+Two things `sleep_now()` has to do on this board, both found on hardware:
+
+* **Clear the expander interrupt last.** The wake line asserts on any input
+  change and stays asserted until the inputs are read. Dropping the rails
+  changes several inputs, and so does releasing the wheel after the long press,
+  so without a final read the chip wakes the instant it sleeps.
+* **Latch the backlight and panel bus pins low** (`board_sleep_pins_hold()`).
+  Left floating in deep sleep, the backlight enable can turn the backlight on
+  and the bus lines feed the unpowered panel, which shows as flickering lines.
+  The latch survives the wake reset; `board_sleep_pins_release()` undoes it
+  first thing at boot.
 
 There is no IMU, so nothing is lost to inertial input: heading comes from the
 phone's course-over-ground field in the 18-byte `POSITION` payload.

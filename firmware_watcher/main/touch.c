@@ -82,20 +82,33 @@ void touch_poll(void)
     // a hit.
     uint8_t n = 0;
     esp_lcd_touch_point_data_t pts[2];
-    touch_sample_t s = {0};
+    esp_lcd_touch_get_data(s_tp, pts, &n, 2);
+    if (n > 2) n = 2;
 
-    if (esp_lcd_touch_get_data(s_tp, pts, &n, 2) == ESP_OK && n > 0) {
-        if (n > 2) n = 2;
-        for (int i = 0; i < n; i++) {
-            int x = pts[i].x, y = pts[i].y;
-            if (x < 0) x = 0;
-            if (y < 0) y = 0;
-            if (x >= BOARD_LCD_W) x = BOARD_LCD_W - 1;
-            if (y >= BOARD_LCD_H) y = BOARD_LCD_H - 1;
-            s.x[i] = (int16_t)x;
-            s.y[i] = (int16_t)y;
-        }
-        s.n = (uint8_t)n;
+    // The SPD2010 only has points to give when it has raised a new report. We
+    // poll faster than it reports, so most reads while a finger is down come
+    // back OK with nothing in them - that is "no news", not a release, and
+    // treating it as one strobes press/release and kills every drag. Hold the
+    // last sample instead; the stale timeout covers a lost release.
+    if (n == 0) {
+        if (s_sample.n && now - s_last_update_us > STALE_US) s_sample.n = 0;
+        return;
+    }
+
+    // The release itself arrives as a report whose point has zero weight, at
+    // the position the finger left from. Drop those: a report with nothing
+    // else in it is the release.
+    touch_sample_t s = {0};
+    for (int i = 0; i < n; i++) {
+        if (pts[i].strength == 0) continue;
+        int x = pts[i].x, y = pts[i].y;
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        if (x >= BOARD_LCD_W) x = BOARD_LCD_W - 1;
+        if (y >= BOARD_LCD_H) y = BOARD_LCD_H - 1;
+        s.x[s.n] = (int16_t)x;
+        s.y[s.n] = (int16_t)y;
+        s.n++;
     }
 
     s_sample = s;

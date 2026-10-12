@@ -65,9 +65,9 @@ static void format_dist(char *out, size_t cap, uint16_t m)
 // ---------------------------------------------------------------- icons
 // Authored in a 100x100 box centred on (cx, cy), then scaled by ICON_PCT so a
 // single knob shrinks every icon without touching the text.
-#define ICON_PCT 90
+#define ICON_PCT UI_SC(90)
 // The same icons at this scale preview the turn after next ("then").
-#define THEN_PCT 44
+#define THEN_PCT UI_SC(44)
 static int s_icon_pct = ICON_PCT;
 static int ip(int v) { return (v * s_icon_pct) / 100; }
 
@@ -261,9 +261,9 @@ static const char *street_line(void)
 // so a quick left-then-right is seen as one move. Only when the second follows
 // within THEN_MAX_M of the first; further apart, it gets its own turn in time.
 #define THEN_MAX_M 250
-#define THEN_CX (BANNER_W - 34)
-#define THEN_CY 52
-#define THEN_ROOM 56   // width given up by the text beside it
+#define THEN_CX (BANNER_W - UI_SC(34))
+#define THEN_CY UI_SC(52)
+#define THEN_ROOM UI_SC(56)   // width given up by the text beside it
 
 static bool then_shown(void)
 {
@@ -394,7 +394,7 @@ static void banner_draw_cb(lv_event_t *e)
         d.font = &lv_font_montserrat_14;
         d.color = lv_color_hex(COL_DIST);
         d.align = LV_TEXT_ALIGN_CENTER;
-        lv_area_t a = {c.x1 + THEN_CX - 30, c.y1 + 6, c.x1 + THEN_CX + 30, c.y1 + 24};
+        lv_area_t a = {c.x1 + THEN_CX - 30, c.y1 + UI_SC(6), c.x1 + THEN_CX + 30, c.y1 + UI_SC(6) + 18};
         lv_draw_label(layer, &d, &a);
         s_icon_pct = THEN_PCT;
         draw_icon(layer, c.x1 + THEN_CX, c.y1 + THEN_CY, s_st.after_maneuver);

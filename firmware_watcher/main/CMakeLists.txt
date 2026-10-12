@@ -19,7 +19,7 @@ idf_component_register(
     "ui_common.c"
   INCLUDE_DIRS "."
   REQUIRES
-    esp_driver_i2c esp_driver_spi esp_driver_gpio esp_driver_ledc esp_driver_sdspi
+    esp_adc esp_driver_pcnt esp_driver_i2c esp_driver_spi esp_driver_gpio esp_driver_ledc esp_driver_sdspi
     esp_lcd esp_lcd_touch esp_lcd_spd2010 esp_lcd_touch_spd2010
     fatfs sdmmc nvs_flash bt esp_timer esp_psram
 )
