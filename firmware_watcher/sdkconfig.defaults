@@ -1,0 +1,97 @@
+# nav-esp32 firmware — SenseCAP Watcher W1-A
+# NOTE: an explicit "# ... is not set" in a generated sdkconfig overrides this
+# file (AGENTS.md rule 1). When changing an option here, delete sdkconfig
+# (or flip it there too).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Flash / partitions ---
+# 32 MB of flash, twice the Waveshare board. The partition table is the
+# vendor's, which puts our `nvs` after `nvsfactory` rather than on top of it
+# (0x9000) — see partitions.csv, and back nvsfactory up before flashing.
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- CPU / cache ---
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+
+# --- PSRAM (octal, in-package 8 MB) ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=49152
+# v2 ran CONFIG_SPIRAM_XIP_FROM_PSRAM (code executed from PSRAM) so that a flash
+# write could not stall the RGB panel's scan-out, which had to keep running from
+# the same buffers. There is no scan-out on this board — the panel is pushed
+# over QSPI from a DMA transfer — so the reason is gone and this stays off, as
+# it is in the vendor's own sdkconfig. Turn it on only if the display is ever
+# seen to stall or glitch during NVS writes.
+
+# --- SPI master ISR placement: LOAD-BEARING, do not "optimize" back on ---
+# Flush completion for the panel is delivered from the SPI ISR, which calls the
+# flash-resident on_color_trans_done() -> lv_display_flush_ready() (display.c).
+# IDF's default is to place that ISR in IRAM, where it *stays enabled* while a
+# flash write has the cache disabled — so the ISR would jump into flash with no
+# cache and fault. # CONFIG_SPI_MASTER_ISR_IN_IRAM is not set
+# With the ISR left in flash, IDF masks it for the duration of the write and the
+# callback runs immediately afterwards. The frames are ~17 ms long and NVS
+# writes are a few ms, so the overlap this avoids is the common case, not a
+# corner case: this is the difference between an intermittent crash and none.
+# If it is ever turned back on, every function in that ISR's call chain —
+# including LVGL's flush path — must be IRAM-safe.
+# CONFIG_SPI_MASTER_ISR_IN_IRAM is not set
+
+# --- RTOS ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- Logging: ship at WARN. The USB-serial console blocks with no reader
+# (AGENTS.md rule 2). ---
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL_WARN=y
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# --- FATFS: long names ("street_map"), read-mostly ---
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# --- Bluetooth: NimBLE peripheral only ---
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# CONFIG_BT_NIMBLE_ROLE_CENTRAL is not set
+# CONFIG_BT_NIMBLE_ROLE_OBSERVER is not set
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# Headroom for bonds + their RPA records (see ble_nav.c store hygiene).
+CONFIG_BT_NIMBLE_MAX_BONDS=5
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=5120
+CONFIG_BT_CTRL_PINNED_TO_CORE_0=y
+
+# --- LVGL 9 ---
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_OS_NONE=y
+CONFIG_LV_DEF_REFR_PERIOD=15
+CONFIG_LV_DPI_DEF=160
+CONFIG_LV_USE_QRCODE=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_20=y
+# CONFIG_LV_USE_PERF_MONITOR is not set
+# CONFIG_LV_USE_SYSMON is not set
+# CONFIG_LV_USE_LOG is not set
+# CONFIG_LV_BUILD_EXAMPLES is not set

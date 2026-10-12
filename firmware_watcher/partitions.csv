@@ -1,0 +1,50 @@
+# nav-esp32 firmware — SenseCAP Watcher W1-A
+#
+# This table is what is ACTUALLY ON THE DEVICE, read back with
+#   esptool.py read_flash 0x8000 0x1000 pt.bin && gen_esp32part.py pt.bin
+#
+# It is NOT the table in the vendor SDK's examples/factory_firmware/partitions.csv,
+# which differs from the shipped device:
+#
+#   vendor SDK example            hardware, read off the device
+#   --------------------------    -------------------------------
+#   ota_0  @ 0x110000, 12M        ota_0  @ 0x200000, 4M
+#   ota_1  @ 0xd10000, 12M        ota_1  @ 0x600000, 4M
+#   model  @ 0x1910000, 1M        (absent)
+#   storage@ 0x1a10000, 6080K     assets @ 0xa00000, 16M
+#
+# Flashing the SDK's table would have relocated ota_1 into the middle of the
+# 16 MB `assets` partition the device actually has. The device wins; this file
+# tracks the device. It is byte-identical to the table already in flash, so
+# writing it changes nothing.
+#
+# Why ours still needs to match: idf.py computes the flash address for
+# `app-flash` from THIS file. If it disagrees with the device, the app lands
+# where the bootloader will not look for it.
+#
+# Offsets are explicit because the shipped table is not what auto-alignment
+# would produce for ota_0 (0x110000). The first four entries land exactly where
+# an auto-computed table would anyway, which is why nvsfactory and our nvs are
+# where they should be:
+#
+#   nvsfactory 0x9000 + 200K  = 0x3b000   <- nvs starts here, immediately after
+#   nvs        0x3b000 + 840K = 0x10d000
+#   otadata    0x10d000       = 0x10f000
+#   phy_init   0x10f000       = 0x110000
+#   ota_0      0x200000       (gap to a 64K boundary, as shipped)
+#
+# `nvsfactory` (0x9000, 200K) holds per-unit factory data and is never written
+# by this firmware — it is not in any write path below. Back it up anyway:
+#   esptool.py --chip esp32s3 --baud 2000000 read_flash 0x9000 204800 nvsfactory.bin
+#
+# Our app is ~1.3 MB, so the 4 MB slots are roomy. `assets` is the vendor's
+# 16 MB SPIFFS region; this firmware does not mount it and leaves it alone.
+#
+# Name,     Type, SubType,  Offset,    Size,  Flags
+nvsfactory, data, nvs,      0x9000,    200K,
+nvs,        data, nvs,      0x3b000,   840K,
+otadata,    data, ota,      0x10d000,  0x2000,
+phy_init,   data, phy,      0x10f000,  0x1000,
+ota_0,      app,  ota_0,    0x200000,  4M,
+ota_1,      app,  ota_1,    0x600000,  4M,
+assets,     data, spiffs,   0xa00000,  16M,

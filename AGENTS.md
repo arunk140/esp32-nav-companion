@@ -11,6 +11,7 @@ ESP32-S3 round-display nav device + Android companion app. Monorepo.
 ## Layout
 
 - `firmware_v2/` — **current firmware**, from-scratch rewrite (same BLE contract, tiles, partitions, NVS keys). ESP-IDF 5.5.2, LVGL 9.6, NimBLE. See `firmware_v2/README.md`. Build: `source ~/.espressif/tools/activate_idf_v5.5.2.sh && cd firmware_v2 && idf.py build && idf.py -p /dev/ttyACM0 flash`. Contract header: `firmware_v2/main/ble_service.h`.
+- `firmware_watcher/` — the same firmware ported to the **SenseCAP Watcher W1-A** (SPD2010 QSPI panel, PCA9535 expander, SD over SPI). Flashed and booting on hardware; the panel takes frames and touch is up, but nothing has been confirmed on the glass. Ported files are only the board layer — `board.c`, `lcd.c`, `touch.c`, `sdcard.c`, `display.c`, `main.c`; everything else is v2. See `firmware_watcher/README.md` (incl. the panel-bus fix that cost the first boot). Flash with **`app-flash`**, never a bare `flash` you did not mean: the device's real partition table has `ota_0` at **0x200000**, not the vendor SDK example's 0x110000. Docs: `docs-watcher/`.
 - `app/` — Kotlin, Gradle wrapper 9.3.1 (cached), AGP 8.13.2. Build: `cd app && ./gradlew :app:assembleDebug`. Java 25 only (Java 21 install is a stub).
 - `tools/` — `download_tiles.py` (MapTiler, polite), `make_test_tiles.py`
 - `tmp/` — tile staging, gitignored. Never commit tiles or binaries.

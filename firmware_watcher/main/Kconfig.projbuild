@@ -1,0 +1,57 @@
+menu "Nav v2 options"
+
+config NAV_DEBUG_STATS
+    bool "Print render/tile/heap stats every 5 s (WARN level)"
+    default n
+    help
+        Dev aid only. Keep off for normal use: the USB-serial console can
+        block when no reader is attached.
+
+config NAV_DEBUG_BLE
+    bool "Log BLE connect/security events (WARN level)"
+    default n
+
+config NAV_DEBUG_DEMO_WALK
+    bool "Simulate GPS fixes (bench test, no phone needed)"
+    default n
+
+config NAV_SLEEP_ENABLE
+    bool "Sleep when idle (screen off, then deep sleep)"
+    default y
+
+config NAV_SCREEN_OFF_MS
+    int "Screen off after this long without touch, phone or movement"
+    depends on NAV_SLEEP_ENABLE
+    range 5000 600000
+    default 60000
+
+config NAV_DEEP_SLEEP_MS
+    int "Deep sleep this long after the screen went off"
+    depends on NAV_SLEEP_ENABLE
+    range 10000 3600000
+    default 600000
+
+config NAV_DARK_MAP
+    bool "Dark map on first boot (the app can change it later)"
+    default y
+    help
+        Initial map theme, used until the app sets one (CMD 0x08) or a
+        stored preference exists. Tiles are inverted as they are loaded.
+
+config NAV_TILE_CACHE_SLOTS
+    int "Tile cache slots (128 KiB PSRAM each)"
+    range 12 40
+    default 28
+
+config NAV_LCD_QSPI_MHZ
+    int "Panel QSPI clock (MHz)"
+    range 20 80
+    default 40
+    help
+        SenseCAP Watcher only: the SPD2010 panel is a QSPI device, so the
+        whole frame goes over 4 data lines. At 40 MHz (what the vendor BSP
+        uses) a full 412x412 RGB565 frame is ~17 ms of pure transfer, which
+        is the hard ceiling on frame rate. The component default is 20 MHz.
+        Raise only if the panel proves stable.
+
+endmenu
